@@ -1,0 +1,25 @@
+# Ignore OneDrive temp files, csv
+*.~*
+.~*
+*.tmp
+*.lock
+*.DS_Store
+Thumbs.db
+.849C9593-D756-4E56-8D6E-42412F2A707B
+*.pdf
+*.csv
+*.out
+*.log
+*.msg
+*.png
+
+# Ignore specific folders
+Newcastle_altitude/
+Rachadawan_code/
+March_2026_Defra_vs_MonUO/
+March_2026_wind/
+Week_March_2026_Monitor_Mesh/
+Week_March_2026_NO/
+gp_results_update/
+_MACOSX/
+
