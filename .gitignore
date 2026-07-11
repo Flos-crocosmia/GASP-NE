@@ -12,6 +12,7 @@ Thumbs.db
 *.log
 *.msg
 *.png
+*.html
 
 # Ignore specific folders
 Newcastle_altitude/
