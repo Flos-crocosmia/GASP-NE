@@ -6,13 +6,11 @@
 *.DS_Store
 Thumbs.db
 .849C9593-D756-4E56-8D6E-42412F2A707B
-*.pdf
 *.csv
 *.out
 *.log
 *.msg
 *.png
-*.html
 
 # Ignore specific folders
 Newcastle_altitude/
