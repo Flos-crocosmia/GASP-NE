@@ -4,15 +4,14 @@ A Shiny for Python app for exploring Newcastle-area air-quality sensors.
 
 The initial version:
 
-- reads the selected sensor names from `naming.csv`;
-- retrieves Urban Observatory coordinates and PM2.5 readings live;
-- displays UO Mesh and Monitor sensors on an interactive map;
-- updates a side panel when a marker is clicked;
-- offers 24-hour, 7-day, and 30-day time windows; and
-- downloads DEFRA/openair yearly files and normalises them to the same chart format;
-- retrieves available AURN coordinates from DEFRA metadata; and
-- keeps locally managed records in the same registry, with support for adding
-  explicit coordinates if a site is absent from AURN metadata.
+- reads the selected sensor names from `naming.csv`
+- retrieves Urban Observatory coordinates and PM2.5 readings live
+- displays UO Monitor, DEFRA and Locally managed sensors on an interactive map
+- updates a side panel when a marker is clicked
+- offers 24-hour, 7-day, and 30-day time windows and choice of custom time interval for PM2.5 readings
+- downloads DEFRA/openair yearly files and normalises them to the same chart format
+- retrieves available AURN coordinates from DEFRA metadata
+- Trend line, 24 hour rolling mean, on time series.
 
 ## Run locally
 
