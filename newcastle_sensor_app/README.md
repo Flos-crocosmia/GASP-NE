@@ -1,4 +1,4 @@
-# Newcastle sensor explorer
+# GASP-NE App
 
 A Shiny for Python app for exploring Newcastle-area air-quality sensors.
 
