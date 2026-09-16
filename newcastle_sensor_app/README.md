@@ -1,17 +1,21 @@
-# Newcastle sensor explorer
+# GASP-NE App
 
 A Shiny for Python app for exploring Newcastle-area air-quality sensors.
 
 The initial version:
 
-- reads the selected sensor names from `naming.csv`
-- retrieves Urban Observatory coordinates and PM2.5 readings live
-- displays UO Monitor, DEFRA and Locally managed sensors on an interactive map
-- updates a side panel when a marker is clicked
-- offers 24-hour, 7-day, and 30-day time windows and choice of custom time interval for PM2.5 readings
-- downloads DEFRA/openair yearly files and normalises them to the same chart format
-- retrieves available AURN coordinates from DEFRA metadata
-- Trend line, 24 hour rolling mean, on time series.
+- Reads the selected sensor names from `naming.csv`
+- Retrieves Urban Observatory coordinates and PM2.5 readings live
+- Retrieves DEFRA and Locally managed automatic monitor PM2.5 readings (coords are in `naming.csv`)
+- Displays UO Monitor, DEFRA and Locally managed sensors on an interactive map
+- 2 tabs for a side panel
+- Explorer side panel updates when a marker is clicked
+    - Offers 24-hour, 7-day, and 30-day time windows and choice of custom time interval for PM2.5 readings and gives summaries.
+    - Downloads DEFRA/openair yearly files and normalises them to the same chart format
+    - Popup for currently chosen timeseries plot with then options for trend line, 24 hour rolling mean.
+    - Demonstrative prediction on timeseries (just a random walk for now and is getting replaced with kriging interpolation and eventually a full spatial GP)
+- Validation side panel allows choice in UO-Mon sensor and returns a scatter with it's closest DEFRA/Local for validation
+    - Options for 7, 30 and 90 day windows and gives summaries.
 
 ## Run locally
 
