@@ -1,8 +1,10 @@
-shiny>=1.4
+shiny>=1.4.0
 shinywidgets>=0.7
 ipyleaflet>=0.20
 plotly>=6.0
 pandas>=2.2
+numpy>=1.26
+geopy>=2.4
 rdata>=1.0
 requests>=2.32
 https://api.v2.urbanobservatory.ac.uk/lib/uo-pyfetch.tar.gz

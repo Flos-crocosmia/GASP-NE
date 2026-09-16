@@ -14,7 +14,6 @@ from shiny import App, reactive, render, ui
 from shinywidgets import output_widget, render_plotly, render_widget
 import plotly.graph_objects as go
 
-# File functions/errors imported
 from data_sources import (
     get_defra_readings,
     get_sensor_metadata,
@@ -198,7 +197,7 @@ app_ui = ui.page_fillable(
                 ui.card(ui.card_body(ui.p("This application collates PM2.5 data from Urban Observatory Monitor sensors, DEFRA "
                                     "AURN sites and locally managed monitoring sites. It provides a cohesive interface for "
                                     "exploring and predicting air quality across the Newcastle upon Tyne region."),
-                        output_widget("sensor_map", height='70vh'),),
+                        output_widget("sensor_map", height="70vh"),),
                     full_screen=True,
                 ),
             ),
@@ -346,7 +345,6 @@ def server(input, output, session):
                 "alt": "EPSRC logo",}
     
     selected_sensor = reactive.value(None)
-    # Holds the downloaded sensor means so that changing the covariance model or range slider doesn't require reload
     kriging_snapshot_state = reactive.value(None)
 
     @reactive.calc
@@ -540,36 +538,43 @@ def server(input, output, session):
                 .dropna()
                 .reset_index())
 
-
     @reactive.effect
     @reactive.event(input.run_kriging)
     def load_kriging_snapshot():
-        """Fetch one common-window PN2.5 average for every available sensor"""
-        window_hours=int(input.kriging_window())
+        """Fetch one common-window PM2.5 average for every available sensor."""
+
+        window_hours = int(input.kriging_window())
         end = datetime.now(timezone.utc)
         start = end - timedelta(hours=window_hours)
-        sensor_df = (sensors().loc[lambda frame: frame["provider"].isin(["UO-Mon", "DEFRA/Local"])]
-                     .dropna(subset=["latitude", "longitude"])
-                     .copy())
+
+        sensor_df = (
+            sensors()
+            .loc[lambda frame: frame["provider"].isin(["UO-Mon", "DEFRA/Local"])]
+            .dropna(subset=["latitude", "longitude"])
+            .copy()
+        )
         sensor_records = sensor_df.to_dict("records")
 
-        # Gets sensor data for one sensor, and spits out the mean
         def load_one_sensor(row):
             try:
                 if str(row["provider"]).startswith("UO-"):
-                    readings = get_uo_readings(sensor_name=row["sensor_name"],
-                                               start=start,
-                                               end=end,
-                                               variable="PM2.5")
+                    readings = get_uo_readings(
+                        sensor_name=row["sensor_name"],
+                        start=start,
+                        end=end,
+                        variable="PM2.5",
+                    )
                 else:
-                    readings = get_defra_readings(site_code=row["code"],
-                                                  start=start,
-                                                  end=end,
-                                                  variable="PM2.5",
-                                                  source_type=row["type"])
+                    readings = get_defra_readings(
+                        site_code=row["code"],
+                        start=start,
+                        end=end,
+                        variable="PM2.5",
+                        source_type=row["type"],
+                    )
             except Exception as exc:
                 return None, f'{row["display_name"]}: {exc}'
-                
+
             if readings.empty or "Value" not in readings:
                 return None, f'{row["display_name"]}: no PM2.5 readings'
 
@@ -577,61 +582,67 @@ def server(input, output, session):
             if len(values) < 3:
                 return None, f'{row["display_name"]}: fewer than 3 valid readings'
 
-            timestamps = pd.to_datetime(readings["Timestamp"], utc=True, errors="coerce",).dropna() 
+            timestamps = pd.to_datetime(
+                readings["Timestamp"],
+                utc=True,
+                errors="coerce",
+            ).dropna()
 
-            result = {"sensor_name": row["sensor_name"],
-                      "display_name": row["display_name"],
-                      "provider": row["provider"],
-                      "code": row["code"],
-                      "type": row["type"],
-                      "latitude": float(row["latitude"]),
-                      "longitude": float(row["longitude"]),
-                      "Value": float(values.mean()),
-                      "reading_count": int(len(values)),
-                      "latest_timestamp": timestamps.max() if not timestamps.empty else pd.NaT,}
+            result = {
+                "sensor_name": row["sensor_name"],
+                "display_name": row["display_name"],
+                "provider": row["provider"],
+                "code": row["code"],
+                "type": row["type"],
+                "latitude": float(row["latitude"]),
+                "longitude": float(row["longitude"]),
+                "Value": float(values.mean()),
+                "reading_count": int(len(values)),
+                "latest_timestamp": timestamps.max() if not timestamps.empty else pd.NaT,
+            }
             return result, None
 
         loaded: list[dict] = []
         unavailable: list[str] = []
-        # Downloads multiple sensors data for time interval concurrently
+
         with ui.Progress(min=0, max=max(len(sensor_records), 1)) as progress:
-                    progress.set(0, message="Loading PM2.5 sensor averages")
-                    worker_count = min(6, max(len(sensor_records), 1))
-        
-                    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                        futures = {
-                            executor.submit(load_one_sensor, row): row
-                            for row in sensor_records
-                        }
-        
-                        for completed_count, future in enumerate(
-                            as_completed(futures),
-                            start=1,
-                        ):
-                            row = futures[future]
-                            try:
-                                result, error = future.result()
-                            except Exception as exc:
-                                result = None
-                                error = f'{row["display_name"]}: {exc}'
-        
-                            if result is not None:
-                                loaded.append(result)
-                            if error is not None:
-                                unavailable.append(error)
-        
-                            progress.set(
-                                completed_count,
-                                message="Loading PM2.5 sensor averages",
-                                detail=(
-                                    f"{completed_count} of {len(sensor_records)} sensors"
-                                ),
-                            )
-        
+            progress.set(0, message="Loading PM2.5 sensor averages")
+            worker_count = min(6, max(len(sensor_records), 1))
+
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(load_one_sensor, row): row
+                    for row in sensor_records
+                }
+
+                for completed_count, future in enumerate(
+                    as_completed(futures),
+                    start=1,
+                ):
+                    row = futures[future]
+                    try:
+                        result, error = future.result()
+                    except Exception as exc:
+                        result = None
+                        error = f'{row["display_name"]}: {exc}'
+
+                    if result is not None:
+                        loaded.append(result)
+                    if error is not None:
+                        unavailable.append(error)
+
+                    progress.set(
+                        completed_count,
+                        message="Loading PM2.5 sensor averages",
+                        detail=(
+                            f"{completed_count} of {len(sensor_records)} sensors"
+                        ),
+                    )
+
         snapshot = pd.DataFrame(loaded)
         if not snapshot.empty:
             snapshot = snapshot.sort_values("display_name").reset_index(drop=True)
-        # Stores all available, attempted and unavailable sensor mean data for PM2.5 in the time interval
+
         kriging_snapshot_state.set(
             {
                 "data": snapshot,
@@ -643,31 +654,55 @@ def server(input, output, session):
             }
         )
 
-    # Run kriging analysis
     @reactive.calc
     def kriging_result():
         state = kriging_snapshot_state.get()
         if state is None:
-            return {"analysis": None,
-                    "error": "Load sensor data to begin the spatial analysis.",}
+            return {
+                "analysis": None,
+                "error": "Load sensor data to begin the spatial analysis.",
+            }
 
         snapshot = state["data"]
         if snapshot.empty:
-            return {"analysis": None,
-                    "error": "None of the sensors returned valid PM2.5 data.",}
+            return {
+                "analysis": None,
+                "error": "None of the sensor feeds returned valid PM2.5 data.",
+            }
 
         try:
-            analysis = run_kriging_analysis(snapshot,
-                                            model=input.kriging_model(),
-                                            parameter_mode=input.kriging_parameter_mode(),
-                                            range_km=float(input.kriging_range_km()),
-                                            nugget_fraction=float(input.kriging_nugget_fraction()),
-                                            grid_size=65,
-                                            validation_code="NEWC",)
+            analysis = run_kriging_analysis(
+                snapshot,
+                model=input.kriging_model(),
+                parameter_mode=input.kriging_parameter_mode(),
+                range_km=float(input.kriging_range_km()),
+                nugget_fraction=float(input.kriging_nugget_fraction()),
+                grid_size=65,
+                validation_code="NEWC",
+            )
         except (KrigingError, ValueError, np.linalg.LinAlgError) as exc:
             return {"analysis": None, "error": str(exc)}
 
-        return {"analysis": analysis, "error": None} 
+        return {"analysis": analysis, "error": None}
+
+    def empty_plot(message):
+        figure = go.Figure()
+        figure.update_layout(
+            annotations=[
+                dict(
+                    text=message,
+                    x=0.5,
+                    y=0.5,
+                    xref="paper",
+                    yref="paper",
+                    showarrow=False,
+                )
+            ],
+            xaxis_visible=False,
+            yaxis_visible=False,
+            margin=dict(l=20, r=20, t=40, b=20),
+        )
+        return figure
 
     @reactive.effect
     @reactive.event(input.show_sensor_chart)
@@ -856,7 +891,6 @@ def server(input, output, session):
                              f"{bias:+.2f} µg/m³",),
                     class_="summary-box",)
 
-    # Bunch of error messages
     @render.ui
     def kriging_status():
         state = kriging_snapshot_state.get()
@@ -872,79 +906,341 @@ def server(input, output, session):
         unavailable_count = len(state["unavailable"])
         window_hours = state["window_hours"]
 
-        status_rows = [ui.div(ui.strong("Usable sensors: "),
-                              f"{available} of {attempted}",),
-                       ui.div(ui.strong("Averaging window: "),
-                              f"{window_hours} hours",),
-                       ui.div(ui.strong("Window ended: "),
-                              state["end"].strftime("%d %b %Y %H:%M UTC"),),]
+        status_children = [
+            ui.div(
+                ui.strong("Usable sensors: "),
+                f"{available} of {attempted}",
+            ),
+            ui.div(
+                ui.strong("Averaging window: "),
+                f"{window_hours} hours",
+            ),
+            ui.div(
+                ui.strong("Window ended: "),
+                state["end"].strftime("%d %b %Y %H:%M UTC"),
+            ),
+        ]
 
         if unavailable_count:
-            status_rows.append(ui.div(ui.strong("Unavailable feeds: "),
-                                      str(unavailable_count),))
+            status_children.append(
+                ui.div(
+                    ui.strong("Unavailable feeds: "),
+                    str(unavailable_count),
+                )
+            )
 
         if 0 < available < 6:
-            status_rows.append(ui.p("The surface is based on a very small network and should be "
-                                    "treated as exploratory.",
-                                    class_="status-note",))
+            status_children.append(
+                ui.p(
+                    "The surface is based on a very small network and should be "
+                    "treated as exploratory.",
+                    class_="status-note",
+                )
+            )
 
-        return ui.div(*status_rows, class_="summary-box")
+        return ui.div(*status_children, class_="summary-box")
 
-    # Parameters and validation statistics
     @render.ui
     def kriging_summary():
-        kriging_results = kriging_result()
-        analysis = kriging_results["analysis"]
-        if analysis is None:
-            return ui.p(kriging_results["error"], class_="status-note")
+        payload = kriging_result()
+        analysis = payload["analysis"]
 
-        diagnostics_rows = [ui.h5("Kriging diagnostics"),
-                            ui.div(ui.strong("Model: "), analysis.model.capitalize()),
-                            ui.div(ui.strong("Fitted spatial range: "),
-                                   f"{analysis.range_km:.2f} km",),
-                            ui.div(ui.strong("Nugget fraction: "),
-                                   f"{100 * analysis.nugget_fraction:.0f}%",),
-                            ui.div(ui.strong("Leave-one-out RMSE: "),
-                                   f"{analysis.loo_rmse:.2f} µg/m³",),
-                            ui.div(ui.strong("Leave-one-out MAE: "),
-                                   f"{analysis.loo_mae:.2f} µg/m³",),]
+        if analysis is None:
+            return ui.p(payload["error"], class_="status-note")
+
+        summary_children = [
+            ui.h5("Kriging diagnostics"),
+            ui.div(ui.strong("Model: "), analysis.model.capitalize()),
+            ui.div(
+                ui.strong("Fitted spatial range: "),
+                f"{analysis.range_km:.2f} km",
+            ),
+            ui.div(
+                ui.strong("Nugget fraction: "),
+                f"{100 * analysis.nugget_fraction:.0f}%",
+            ),
+            ui.div(
+                ui.strong("Leave-one-out RMSE: "),
+                f"{analysis.loo_rmse:.2f} µg/m³",
+            ),
+            ui.div(
+                ui.strong("Leave-one-out MAE: "),
+                f"{analysis.loo_mae:.2f} µg/m³",
+            ),
+        ]
 
         if analysis.validation is None:
-            diagnostics_rows.append(ui.p("Newcastle Centre was unavailable, so the Civic Centre "
-                                         "holdout diagnostic could not be calculated.",
-                                         class_="status-note",))
+            summary_children.append(
+                ui.p(
+                    "Newcastle Centre was unavailable, so the Civic Centre "
+                    "holdout diagnostic could not be calculated.",
+                    class_="status-note",
+                )
+            )
         else:
             validation = analysis.validation
-            diagnostics_rows.extend([ui.hr(),
-                                     ui.h5("Civic Centre holdout"),
-                                     ui.div(ui.strong("Observed mean: "),
-                                            f'{validation["observed"]:.2f} µg/m³',),
-                                     ui.div(ui.strong("Predicted background: "),
-                                            f'{validation["background_prediction"]:.2f} µg/m³',),
-                                     ui.div(ui.strong("Local contribution: "),
-                                            f'{validation["local_contribution"]:+.2f} µg/m³',),
-                                     ui.div(ui.strong("95% prediction interval: "),
-                                            (f'{validation["interval_lower"]:.2f} to '
-                                             f'{validation["interval_upper"]:.2f} µg/m³'),),])
+            summary_children.extend(
+                [
+                    ui.hr(),
+                    ui.h5("Civic Centre holdout"),
+                    ui.div(
+                        ui.strong("Observed mean: "),
+                        f'{validation["observed"]:.2f} µg/m³',
+                    ),
+                    ui.div(
+                        ui.strong("Predicted background: "),
+                        f'{validation["background_prediction"]:.2f} µg/m³',
+                    ),
+                    ui.div(
+                        ui.strong("Local contribution: "),
+                        f'{validation["local_contribution"]:+.2f} µg/m³',
+                    ),
+                    ui.div(
+                        ui.strong("95% prediction interval: "),
+                        (
+                            f'{validation["interval_lower"]:.2f} to '
+                            f'{validation["interval_upper"]:.2f} µg/m³'
+                        ),
+                    ),
+                ]
+            )
 
-        return ui.div(*diagnostics_rows, class_="summary-box")
+        return ui.div(*summary_children, class_="summary-box")
 
-    def empty_plot(message):
+    @render_plotly
+    def kriging_surface():
+        payload = kriging_result()
+        analysis = payload["analysis"]
+        if analysis is None:
+            return empty_plot(payload["error"])
+
+        stations = analysis.stations
+        minimum = min(float(np.min(analysis.prediction)), float(stations["Value"].min()))
+        maximum = max(float(np.max(analysis.prediction)), float(stations["Value"].max()))
+
         figure = go.Figure()
+        figure.add_trace(
+            go.Contour(
+                x=analysis.grid_longitude[0, :],
+                y=analysis.grid_latitude[:, 0],
+                z=analysis.prediction,
+                colorscale="Viridis",
+                zmin=minimum,
+                zmax=maximum,
+                contours={"showlines": False},
+                colorbar={"title": "PM2.5<br>µg/m³"},
+                hovertemplate=(
+                    "Longitude: %{x:.4f}<br>Latitude: %{y:.4f}<br>"
+                    "Background: %{z:.2f} µg/m³<extra></extra>"
+                ),
+                name="Kriged background",
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=stations["longitude"],
+                y=stations["latitude"],
+                mode="markers",
+                text=stations["display_name"],
+                marker={
+                    "size": 11,
+                    "color": stations["Value"],
+                    "colorscale": "Viridis",
+                    "cmin": minimum,
+                    "cmax": maximum,
+                    "showscale": False,
+                    "line": {"color": "white", "width": 1.5},
+                },
+                hovertemplate=(
+                    "<b>%{text}</b><br>Observed mean: "
+                    "%{marker.color:.2f} µg/m³<extra></extra>"
+                ),
+                name="Sensors",
+            )
+        )
         figure.update_layout(
-            annotations=[
-                dict(
-                    text=message,
-                    x=0.5,
-                    y=0.5,
-                    xref="paper",
-                    yref="paper",
-                    showarrow=False,
-                )
-            ],
-            xaxis_visible=False,
-            yaxis_visible=False,
-            margin=dict(l=20, r=20, t=40, b=20),
+            title="Ordinary-kriging spatial background",
+            xaxis_title="Longitude",
+            yaxis_title="Latitude",
+            margin=dict(l=55, r=25, t=65, b=50),
+            hovermode="closest",
+        )
+        return figure
+
+    @render_plotly
+    def kriging_uncertainty():
+        payload = kriging_result()
+        analysis = payload["analysis"]
+        if analysis is None:
+            return empty_plot(payload["error"])
+
+        prediction_sd = np.sqrt(analysis.prediction_variance)
+        stations = analysis.stations
+        figure = go.Figure(
+            go.Contour(
+                x=analysis.grid_longitude[0, :],
+                y=analysis.grid_latitude[:, 0],
+                z=prediction_sd,
+                colorscale="Magma",
+                contours={"showlines": False},
+                colorbar={"title": "Prediction SD<br>µg/m³"},
+                hovertemplate=(
+                    "Longitude: %{x:.4f}<br>Latitude: %{y:.4f}<br>"
+                    "Prediction SD: %{z:.2f} µg/m³<extra></extra>"
+                ),
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=stations["longitude"],
+                y=stations["latitude"],
+                mode="markers",
+                text=stations["display_name"],
+                marker={
+                    "size": 9,
+                    "color": "white",
+                    "line": {"color": "#222222", "width": 1.5},
+                },
+                hovertemplate="<b>%{text}</b><extra></extra>",
+                name="Sensors",
+            )
+        )
+        figure.update_layout(
+            title="Kriging prediction uncertainty",
+            xaxis_title="Longitude",
+            yaxis_title="Latitude",
+            margin=dict(l=55, r=25, t=65, b=50),
+        )
+        return figure
+
+    @render_plotly
+    def kriging_variogram():
+        payload = kriging_result()
+        analysis = payload["analysis"]
+        if analysis is None:
+            return empty_plot(payload["error"])
+
+        empirical = analysis.empirical_variogram
+        marker_size = 8 + 1.5 * empirical["pair_count"].to_numpy(dtype=float)
+        figure = go.Figure()
+        figure.add_trace(
+            go.Scatter(
+                x=empirical["distance_km"],
+                y=empirical["semivariance"],
+                mode="markers",
+                customdata=empirical["pair_count"],
+                marker={
+                    "size": marker_size,
+                    "color": "#386cb0",
+                    "opacity": 0.75,
+                },
+                name="Empirical bins",
+                hovertemplate=(
+                    "Distance: %{x:.2f} km<br>Semivariance: %{y:.3f}<br>"
+                    "Pairs: %{customdata}<extra></extra>"
+                ),
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=analysis.theoretical_distance_km,
+                y=analysis.theoretical_semivariance,
+                mode="lines",
+                line={"color": "#e31a1c", "width": 2.5},
+                name=f"Fitted {analysis.model}",
+            )
+        )
+        figure.add_hline(
+            y=analysis.sill,
+            line_color="#666666",
+            line_dash="dot",
+            annotation_text="Sample variance",
+        )
+        figure.update_layout(
+            title="Empirical and fitted variogram",
+            xaxis_title="Sensor separation (km)",
+            yaxis_title="Semivariance ((µg/m³)²)",
+            margin=dict(l=70, r=30, t=70, b=60),
+            legend=dict(orientation="h", y=1.02, x=0),
+        )
+        return figure
+
+    @render_plotly
+    def kriging_covariance():
+        payload = kriging_result()
+        analysis = payload["analysis"]
+        if analysis is None:
+            return empty_plot(payload["error"])
+
+        labels = analysis.stations["display_name"].tolist()
+        figure = go.Figure(
+            go.Heatmap(
+                z=analysis.covariance_matrix,
+                x=labels,
+                y=labels,
+                colorscale="Viridis",
+                colorbar={"title": "Covariance<br>(µg/m³)²"},
+                hovertemplate=(
+                    "%{y}<br>%{x}<br>Covariance: %{z:.3f}<extra></extra>"
+                ),
+            )
+        )
+        figure.update_layout(
+            title="Sensor covariance matrix implied by the variogram",
+            margin=dict(l=190, r=35, t=70, b=180),
+            xaxis={"tickangle": -45},
+        )
+        return figure
+
+    @render_plotly
+    def kriging_local_contributions():
+        payload = kriging_result()
+        analysis = payload["analysis"]
+        if analysis is None:
+            return empty_plot(payload["error"])
+
+        contributions = (
+            analysis.local_contributions
+            .sort_values("local_contribution")
+            .reset_index(drop=True)
+        )
+        colours = np.where(
+            contributions["local_contribution"] >= 0,
+            "#d95f02",
+            "#386cb0",
+        )
+        customdata = np.column_stack(
+            [
+                contributions["observed"],
+                contributions["background_prediction"],
+                contributions["prediction_sd"],
+            ]
+        )
+
+        figure = go.Figure(
+            go.Bar(
+                x=contributions["local_contribution"],
+                y=contributions["display_name"],
+                orientation="h",
+                marker_color=colours,
+                customdata=customdata,
+                hovertemplate=(
+                    "<b>%{y}</b><br>Local contribution: %{x:+.2f} µg/m³"
+                    "<br>Observed: %{customdata[0]:.2f} µg/m³"
+                    "<br>LOO background: %{customdata[1]:.2f} µg/m³"
+                    "<br>Prediction SD: %{customdata[2]:.2f} µg/m³"
+                    "<extra></extra>"
+                ),
+            )
+        )
+        figure.add_vline(x=0, line_color="#333333", line_width=1.5)
+        figure.update_layout(
+            title=(
+                "Local contribution = observed mean − leave-one-out background"
+            ),
+            xaxis_title="Estimated local contribution (µg/m³)",
+            yaxis_title=None,
+            margin=dict(l=210, r=35, t=70, b=60),
         )
         return figure
 
@@ -1198,140 +1494,6 @@ def server(input, output, session):
                          scaleanchor="x",
                          scaleratio=1,)
         return fig
-
-    # Estimated regional background
-    @render_plotly
-    def kriging_surface():
-        kriging_results = kriging_result()
-        analysis = kriging_results["analysis"]
-        if analysis is None:
-            return empty_plot(kriging_results["error"])
-
-        stations = analysis.stations
-        minimum = min(float(np.min(analysis.prediction)), float(stations["Value"].min()))
-        maximum = max(float(np.max(analysis.prediction)), float(stations["Value"].max()))
-
-        figure = go.Figure()
-        figure.add_trace(go.Contour(x=analysis.grid_longitude[0, :], y=analysis.grid_latitude[:, 0], z=analysis.prediction,
-                                    colorscale="Viridis",
-                                    zmin=minimum,
-                                    zmax=maximum,
-                                    contours={"showlines": False},
-                                    colorbar={"title": "PM2.5<br>µg/m³"},
-                                    hovertemplate=("Longitude: %{x:.4f}<br>Latitude: %{y:.4f}<br>"
-                                                   "Background: %{z:.2f} µg/m³<extra></extra>"),
-                                    name="Kriged background",))
-        figure.add_trace(go.Scatter(x=stations["longitude"], y=stations["latitude"],
-                                    mode="markers",
-                                    text=stations["display_name"],
-                                    marker={"size": 11, "color": stations["Value"],
-                                            "colorscale": "Viridis", "cmin": minimum, "cmax": maximum,
-                                            "showscale": False, "line": {"color": "white", "width": 1.5},},
-                                    hovertemplate=("<b>%{text}</b><br>Observed mean: "
-                                                   "%{marker.color:.2f} µg/m³<extra></extra>"),
-                                    name="Sensors",))
-        figure.update_layout(title="Ordinary-kriging spatial background",
-                             xaxis_title="Longitude", yaxis_title="Latitude",
-                             margin=dict(l=55, r=25, t=65, b=50),
-                             hovermode="closest",)
-        return figure
-
-    # Kriging standard deviation
-    @render_plotly
-    def kriging_uncertainty():
-        kriging_results = kriging_result()
-        analysis = kriging_results["analysis"]
-        if analysis is None:
-            return empty_plot(kriging_results["error"])
-
-        prediction_sd = np.sqrt(analysis.prediction_variance)
-        stations = analysis.stations
-        figure = go.Figure(go.Contour(x=analysis.grid_longitude[0, :], y=analysis.grid_latitude[:, 0], z=prediction_sd,
-                                      colorscale="Magma", contours={"showlines": False},
-                                      colorbar={"title": "Prediction SD<br>µg/m³"},
-                                      hovertemplate=("Longitude: %{x:.4f}<br>Latitude: %{y:.4f}<br>"
-                                                     "Prediction SD: %{z:.2f} µg/m³<extra></extra>"),))
-        figure.add_trace(go.Scatter(x=stations["longitude"], y=stations["latitude"],
-                                    mode="markers", text=stations["display_name"],
-                                    marker={"size": 9, "color": "white", "line": {"color": "#222222", "width": 1.5},},
-                                    hovertemplate="<b>%{text}</b><extra></extra>",
-                                    name="Sensors",))
-        figure.update_layout(title="Kriging prediction uncertainty",
-                             xaxis_title="Longitude", yaxis_title="Latitude",
-                             margin=dict(l=55, r=25, t=65, b=50),)
-        return figure
-
-    # Distance-versus-dissimilarity diagnostic variogram
-    @render_plotly
-    def kriging_variogram():
-        kriging_results = kriging_result()
-        analysis = kriging_results["analysis"]
-        if analysis is None:
-            return empty_plot(kriging_results["error"])
-
-        empirical = analysis.empirical_variogram
-        marker_size = 8 + 1.5 * empirical["pair_count"].to_numpy(dtype=float)
-        figure = go.Figure()
-        figure.add_trace(go.Scatter(x=empirical["distance_km"], y=empirical["semivariance"],
-                                    mode="markers",
-                                    customdata=empirical["pair_count"],
-                                    marker={"size": marker_size, "color": "#386cb0", "opacity": 0.75,},
-                                    name="Empirical bins",
-                                    hovertemplate=("Distance: %{x:.2f} km<br>Semivariance: %{y:.3f}<br>"
-                                                   "Pairs: %{customdata}<extra></extra>"),))
-        figure.add_trace(go.Scatter(x=analysis.theoretical_distance_km, y=analysis.theoretical_semivariance,
-                                    mode="lines", line={"color": "#e31a1c", "width": 2.5},
-                                    name=f"Fitted {analysis.model}",))
-        figure.add_hline(y=analysis.sill, line_color="#666666", line_dash="dot", annotation_text="Sample variance",)
-        figure.update_layout(title="Empirical and fitted variogram",
-                             xaxis_title="Sensor separation (km)", yaxis_title="Semivariance ((µg/m³)²)",
-                             margin=dict(l=70, r=30, t=70, b=60),
-                             legend=dict(orientation="h", y=1.02, x=0),)
-        return figure
-
-    # Sensor covariance heatmap
-    @render_plotly
-    def kriging_covariance():
-        kriging_results = kriging_result()
-        analysis = kriging_results["analysis"]
-        if analysis is None:
-            return empty_plot(kriging_results["error"])
-
-        labels = analysis.stations["display_name"].tolist()
-        figure = go.Figure(go.Heatmap(z=analysis.covariance_matrix, x=labels, y=labels,
-                                      colorscale="Viridis", colorbar={"title": "Covariance<br>(µg/m³)²"},
-                                      hovertemplate=("%{y}<br>%{x}<br>Covariance: %{z:.3f}<extra></extra>"),))
-        figure.update_layout(title="Sensor covariance matrix implied by the variogram",
-                             margin=dict(l=190, r=35, t=70, b=180),
-                             xaxis={"tickangle": -45},)
-        return figure
-
-    # Measured minus background
-    @render_plotly
-    def kriging_local_contributions():
-        kriging_results = kriging_result()
-        analysis = kriging_results["analysis"]
-        if analysis is None:
-            return empty_plot(kriging_results["error"])
-
-        contributions = (analysis.local_contributions
-                         .sort_values("local_contribution")
-                         .reset_index(drop=True))
-        colours = np.where(contributions["local_contribution"] >= 0, "#d95f02", "#386cb0",)
-        customdata = np.column_stack([contributions["observed"], contributions["background_prediction"], contributions["prediction_sd"],])
-
-        figure = go.Figure(go.Bar(x=contributions["local_contribution"], y=contributions["display_name"], 
-                                  orientation="h", marker_color=colours, customdata=customdata,
-                                  hovertemplate=("<b>%{y}</b><br>Local contribution: %{x:+.2f} µg/m³"
-                                                 "<br>Observed: %{customdata[0]:.2f} µg/m³"
-                                                 "<br>LOO background: %{customdata[1]:.2f} µg/m³"
-                                                 "<br>Prediction SD: %{customdata[2]:.2f} µg/m³"
-                                                 "<extra></extra>"),))
-        figure.add_vline(x=0, line_color="#333333", line_width=1.5)
-        figure.update_layout(title=("Local contribution = observed mean − leave-one-out background"),
-                             xaxis_title="Estimated local contribution (µg/m³)", yaxis_title=None,
-                             margin=dict(l=210, r=35, t=70, b=60),)
-        return figure
 
 
 app = App(app_ui, server,)

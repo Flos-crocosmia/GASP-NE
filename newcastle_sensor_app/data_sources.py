@@ -53,8 +53,8 @@ def get_sensor_metadata(registry: pd.DataFrame) -> pd.DataFrame:
         result["longitude"] = pd.NA
 
     try:
-        # Fetch only the local area. Requesting every UO sensor can make the
-        # initial Shiny session appear to hang.
+        # Only the local area. Requesting every UO sensor can make the
+        # initial Shiny session appear to lag heavily.
         response = requests.get(
             f"{UO_BASE}/sensors/csv",
             params={
