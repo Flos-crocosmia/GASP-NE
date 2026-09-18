@@ -47,7 +47,7 @@ class KrigingAnalysis:
 
 
 def pairwise_distance(first, second):
-    """Euclidean distance between every point in two arrays."""
+    """Euclidean distance between every point."""
     difference = first[:, None, :] - second[None, :, :]
     return np.sqrt(np.sum(difference**2, axis=2))
 

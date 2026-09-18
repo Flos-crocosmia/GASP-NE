@@ -5,14 +5,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
-from geopy.distance import geodesic
+import contextily as cx
+import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 import hashlib
 
 from ipyleaflet import CircleMarker, Map, basemaps
 from ipywidgets import Layout
 from shiny import App, reactive, render, ui
 from shinywidgets import output_widget, render_plotly, render_widget
-import plotly.graph_objects as go
+from pyproj import Transformer
+from geopy.distance import geodesic
 
 # File functions/errors imported
 from data_sources import (
@@ -26,6 +29,11 @@ from kriging import KrigingError, run_kriging_analysis
 APP_DIR = Path(__file__).resolve().parent
 PM25_THRESHOLD = 10.0
 DEMO_FORECAST_HOURS = 24
+WEB_MERCATOR_TRANSFORMER = Transformer.from_crs(
+    "EPSG:4326",
+    "EPSG:3857",
+    always_xy=True,
+)
 
 registry = load_sensor_registry(APP_DIR / "naming.csv")
 
@@ -258,7 +266,7 @@ app_ui = ui.page_fillable(
                         "kriging_parameter_mode",
                         "Variogram parameters",
                         choices={
-                            "auto": "Automatic (leave-one-out)",
+                            "auto": "Automatic",
                             "manual": "Manual",
                         },
                         selected="auto",
@@ -292,7 +300,7 @@ app_ui = ui.page_fillable(
                     ui.output_ui("kriging_summary"),
                     ui.p(
                         "Automatic mode chooses the range and nugget using "
-                        "leave-one-sensor-out prediction error.",
+                        "leave-one-out prediction error.",
                         class_="status-note",
                     ),
                     width=390,
@@ -301,16 +309,16 @@ app_ui = ui.page_fillable(
                 ui.navset_card_tab(
                     ui.nav_panel(
                         "Background",
-                        output_widget("kriging_surface", height="72vh"),
+                        ui.output_plot("kriging_surface", height="700px",),
                     ),
                     ui.nav_panel(
                         "Uncertainty",
-                        output_widget("kriging_uncertainty", height="72vh"),
+                        ui.output_plot("kriging_uncertainty", height="700px"),
                     ),
-                    ui.nav_panel(
-                        "Variogram",
-                        output_widget("kriging_variogram", height="72vh"),
-                    ),
+                    #ui.nav_panel(
+                    #    "Variogram",
+                    #    output_widget("kriging_variogram", height="72vh"),
+                    #),
                     ui.nav_panel(
                         "Covariance matrix",
                         output_widget("kriging_covariance", height="72vh"),
@@ -327,6 +335,67 @@ app_ui = ui.page_fillable(
         selected="explorer",
     ),
 )
+
+def empty_plot(message):
+        figure = go.Figure()
+        figure.update_layout(
+            annotations=[dict(text=message, x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False,)],
+            xaxis_visible=False, yaxis_visible=False,
+            margin=dict(l=20, r=20, t=40, b=20),)
+        return figure
+
+def empty_static_plot(message):
+    figure, axis = plt.subplots(figsize=(10, 8), dpi=120,)
+    axis.text(0.5, 0.5, message, horizontalalignment="center", verticalalignment="center", 
+              transform=axis.transAxes, fontsize=12, color="#666666",)
+    axis.set_axis_off()
+    figure.tight_layout()
+    return figure
+
+def static_kriging_map(grid_longitude, grid_latitude, values, stations, title, colour_map, colourbar_title,colour_limits=None,):
+    # Static kriging map over OpenStreetMap
+    # Convert the kriging grid to Web Mercator.
+    grid_x, grid_y = WEB_MERCATOR_TRANSFORMER.transform(grid_longitude, grid_latitude,)
+    # Convert sensor coordinates to Web Mercator.
+    sensor_x, sensor_y = WEB_MERCATOR_TRANSFORMER.transform(stations["longitude"].to_numpy(), stations["latitude"].to_numpy(),)
+    if colour_limits is None:
+        colour_min = float(np.nanmin(values))
+        colour_max = float(np.nanmax(values))
+    else:
+        colour_min, colour_max = colour_limits
+
+    if colour_max <= colour_min:
+        colour_max = colour_min + 0.001
+
+    contour_levels = np.linspace(colour_min, colour_max, 25,)
+    figure, axis = plt.subplots(figsize=(10, 8), dpi=120,)
+    # Set the geographical area before adding the basemap.
+    x_padding = (np.nanmax(grid_x) - np.nanmin(grid_x)) * 0.03
+    y_padding = (np.nanmax(grid_y) - np.nanmin(grid_y)) * 0.03
+    axis.set_xlim(np.nanmin(grid_x) - x_padding, np.nanmax(grid_x) + x_padding,)
+    axis.set_ylim(np.nanmin(grid_y) - y_padding, np.nanmax(grid_y) + y_padding,)
+    # Static OpenStreetMap background.
+    cx.add_basemap(axis, source=cx.providers.OpenStreetMap.Mapnik, zoom=11,)
+    # Kriging surface.
+    filled_contours = axis.contourf(grid_x, grid_y, values, levels=contour_levels, 
+                                    cmap=colour_map, vmin=colour_min, vmax=colour_max, alpha=0.62,
+                                    extend="both", zorder=2,)
+    # Faint contour boundaries.
+    axis.contour(grid_x, grid_y, values,
+                 levels=contour_levels[::3], colors="#333333", linewidths=0.4, alpha=0.45, zorder=3,)
+    # stations.
+    axis.scatter(sensor_x, sensor_y, s=45, color="#111111",
+                 edgecolor="white", linewidth=0.8, label="Monitoring stations", zorder=4,)
+    colourbar = figure.colorbar(filled_contours, ax=axis,
+                                shrink=0.8,
+                                pad=0.02,)
+    colourbar.set_label(colourbar_title)
+    axis.set_title(title, fontsize=14, pad=12,)
+    axis.legend(loc="upper right", framealpha=0.9,)
+    axis.set_axis_off()
+    figure.tight_layout()
+
+    return figure
 
 
 def server(input, output, session):
@@ -880,7 +949,7 @@ def server(input, output, session):
                               state["end"].strftime("%d %b %Y %H:%M UTC"),),]
 
         if unavailable_count:
-            status_rows.append(ui.div(ui.strong("Unavailable feeds: "),
+            status_rows.append(ui.div(ui.strong("Unavailable sensors: "),
                                       str(unavailable_count),))
 
         if 0 < available < 6:
@@ -910,13 +979,13 @@ def server(input, output, session):
                                    f"{analysis.loo_mae:.2f} µg/m³",),]
 
         if analysis.validation is None:
-            diagnostics_rows.append(ui.p("Newcastle Centre was unavailable, so the Civic Centre "
-                                         "holdout diagnostic could not be calculated.",
+            diagnostics_rows.append(ui.p("Newcastle Centre was unavailable, so the NEWC "
+                                         "LOO diagnostic could not be calculated.",
                                          class_="status-note",))
         else:
             validation = analysis.validation
             diagnostics_rows.extend([ui.hr(),
-                                     ui.h5("Civic Centre holdout"),
+                                     ui.h5("NEWC LOO"),
                                      ui.div(ui.strong("Observed mean: "),
                                             f'{validation["observed"]:.2f} µg/m³',),
                                      ui.div(ui.strong("Predicted background: "),
@@ -928,25 +997,6 @@ def server(input, output, session):
                                              f'{validation["interval_upper"]:.2f} µg/m³'),),])
 
         return ui.div(*diagnostics_rows, class_="summary-box")
-
-    def empty_plot(message):
-        figure = go.Figure()
-        figure.update_layout(
-            annotations=[
-                dict(
-                    text=message,
-                    x=0.5,
-                    y=0.5,
-                    xref="paper",
-                    yref="paper",
-                    showarrow=False,
-                )
-            ],
-            xaxis_visible=False,
-            yaxis_visible=False,
-            margin=dict(l=20, r=20, t=40, b=20),
-        )
-        return figure
 
     @render_plotly
     def sensor_chart():
@@ -1185,11 +1235,10 @@ def server(input, output, session):
                                        "dash": "dot",},)
                                        )
 
-        fig.update_layout(margin=dict(l=40, r=20, t=60, b=40),
-                          legend=dict(orientation="h", yanchor="bottom",
-                                      y=1.02,
-                                      xanchor="left",
-                                      x=0,),)
+        fig.update_layout(height=750,
+                          margin=dict(l=40, r=20, t=60, b=40),
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                      xanchor="left", x=0,),)
         axis_padding = max((overall_max - overall_min) * 0.05, 0.5,)
         axis_min = overall_min - axis_padding
         axis_max = overall_max + axis_padding
@@ -1200,94 +1249,66 @@ def server(input, output, session):
         return fig
 
     # Estimated regional background
-    @render_plotly
+    @render.plot
     def kriging_surface():
         kriging_results = kriging_result()
         analysis = kriging_results["analysis"]
         if analysis is None:
-            return empty_plot(kriging_results["error"])
-
+            return empty_static_plot(kriging_results["error"])
         stations = analysis.stations
-        minimum = min(float(np.min(analysis.prediction)), float(stations["Value"].min()))
-        maximum = max(float(np.max(analysis.prediction)), float(stations["Value"].max()))
-
-        figure = go.Figure()
-        figure.add_trace(go.Contour(x=analysis.grid_longitude[0, :], y=analysis.grid_latitude[:, 0], z=analysis.prediction,
-                                    colorscale="Viridis",
-                                    zmin=minimum,
-                                    zmax=maximum,
-                                    contours={"showlines": False},
-                                    colorbar={"title": "PM2.5<br>µg/m³"},
-                                    hovertemplate=("Longitude: %{x:.4f}<br>Latitude: %{y:.4f}<br>"
-                                                   "Background: %{z:.2f} µg/m³<extra></extra>"),
-                                    name="Kriged background",))
-        figure.add_trace(go.Scatter(x=stations["longitude"], y=stations["latitude"],
-                                    mode="markers",
-                                    text=stations["display_name"],
-                                    marker={"size": 11, "color": stations["Value"],
-                                            "colorscale": "Viridis", "cmin": minimum, "cmax": maximum,
-                                            "showscale": False, "line": {"color": "white", "width": 1.5},},
-                                    hovertemplate=("<b>%{text}</b><br>Observed mean: "
-                                                   "%{marker.color:.2f} µg/m³<extra></extra>"),
-                                    name="Sensors",))
-        figure.update_layout(title="Ordinary-kriging spatial background",
-                             xaxis_title="Longitude", yaxis_title="Latitude",
-                             margin=dict(l=55, r=25, t=65, b=50),
-                             hovermode="closest",)
-        return figure
+        return static_kriging_map(grid_longitude=analysis.grid_longitude,
+                                  grid_latitude=analysis.grid_latitude,
+                                  values=analysis.prediction,
+                                  stations=stations,
+                                  title="Kriging PM2.5 prediction",
+                                  colour_map="viridis",
+                                  colourbar_title="Predicted PM2.5 (µg/m³)",)
 
     # Kriging standard deviation
-    @render_plotly
+    @render.plot
     def kriging_uncertainty():
         kriging_results = kriging_result()
         analysis = kriging_results["analysis"]
         if analysis is None:
-            return empty_plot(kriging_results["error"])
-
+            return empty_static_plot(kriging_results["error"])
         prediction_sd = np.sqrt(analysis.prediction_variance)
         stations = analysis.stations
-        figure = go.Figure(go.Contour(x=analysis.grid_longitude[0, :], y=analysis.grid_latitude[:, 0], z=prediction_sd,
-                                      colorscale="Magma", contours={"showlines": False},
-                                      colorbar={"title": "Prediction SD<br>µg/m³"},
-                                      hovertemplate=("Longitude: %{x:.4f}<br>Latitude: %{y:.4f}<br>"
-                                                     "Prediction SD: %{z:.2f} µg/m³<extra></extra>"),))
-        figure.add_trace(go.Scatter(x=stations["longitude"], y=stations["latitude"],
-                                    mode="markers", text=stations["display_name"],
-                                    marker={"size": 9, "color": "white", "line": {"color": "#222222", "width": 1.5},},
-                                    hovertemplate="<b>%{text}</b><extra></extra>",
-                                    name="Sensors",))
-        figure.update_layout(title="Kriging prediction uncertainty",
-                             xaxis_title="Longitude", yaxis_title="Latitude",
-                             margin=dict(l=55, r=25, t=65, b=50),)
-        return figure
+        return static_kriging_map(grid_longitude=analysis.grid_longitude,
+                                  grid_latitude=analysis.grid_latitude,
+                                  values=prediction_sd,
+                                  stations=stations,
+                                  title="Kriging prediction uncertainty",
+                                  colour_map="magma",
+                                  colourbar_title="Prediction standard deviation (µg/m³)",)
 
     # Distance-versus-dissimilarity diagnostic variogram
-    @render_plotly
-    def kriging_variogram():
-        kriging_results = kriging_result()
-        analysis = kriging_results["analysis"]
-        if analysis is None:
-            return empty_plot(kriging_results["error"])
-
-        empirical = analysis.empirical_variogram
-        marker_size = 8 + 1.5 * empirical["pair_count"].to_numpy(dtype=float)
-        figure = go.Figure()
-        figure.add_trace(go.Scatter(x=empirical["distance_km"], y=empirical["semivariance"],
-                                    mode="markers",
-                                    customdata=empirical["pair_count"],
-                                    marker={"size": marker_size, "color": "#386cb0", "opacity": 0.75,},
-                                    name="Empirical bins",
-                                    hovertemplate=("Distance: %{x:.2f} km<br>Semivariance: %{y:.3f}<br>"
-                                                   "Pairs: %{customdata}<extra></extra>"),))
-        figure.add_trace(go.Scatter(x=analysis.theoretical_distance_km, y=analysis.theoretical_semivariance,
-                                    mode="lines", line={"color": "#e31a1c", "width": 2.5},
-                                    name=f"Fitted {analysis.model}",))
-        figure.add_hline(y=analysis.sill, line_color="#666666", line_dash="dot", annotation_text="Sample variance",)
-        figure.update_layout(title="Empirical and fitted variogram",
-                             xaxis_title="Sensor separation (km)", yaxis_title="Semivariance ((µg/m³)²)",
-                             margin=dict(l=70, r=30, t=70, b=60),
-                             legend=dict(orientation="h", y=1.02, x=0),)
-        return figure
+    #@render_plotly
+    #def kriging_variogram():
+    #    kriging_results = kriging_result()
+    #    analysis = kriging_results["analysis"]
+    #    if analysis is None:
+    #        return empty_plot(kriging_results["error"])
+    #
+    #    empirical = analysis.empirical_variogram
+    #    marker_size = 8 + 1.5 * empirical["pair_count"].to_numpy(dtype=float)
+    #    figure = go.Figure()
+    #    figure.add_trace(go.Scatter(x=empirical["distance_km"], y=empirical["semivariance"],
+    #                                mode="markers",
+    #                                customdata=empirical["pair_count"],
+    #                                marker={"size": marker_size, "color": "#386cb0", "opacity": 0.75,},
+    #                                name="Empirical bins",
+    #                                hovertemplate=("Distance: %{x:.2f} km<br>Semivariance: %{y:.3f}<br>"
+    #                                               "Pairs: %{customdata}<extra></extra>"),))
+    #    figure.add_trace(go.Scatter(x=analysis.theoretical_distance_km, y=analysis.theoretical_semivariance,
+    #                                mode="lines", line={"color": "#e31a1c", "width": 2.5},
+    #                                name=f"Fitted {analysis.model}",))
+    #    figure.add_hline(y=analysis.sill, line_color="#666666", line_dash="dot", annotation_text="Sample variance",)
+    #    figure.update_layout(title="Empirical and fitted variogram",
+    #                         xaxis_title="Sensor separation (km)", yaxis_title="Semivariance ((µg/m³)²)",
+    #                         margin=dict(l=70, r=30, t=70, b=60),
+    #                         height=750, autosize=True,
+    #                         legend=dict(orientation="h", y=1.02, x=0),)
+    #    return figure
 
     # Sensor covariance heatmap
     @render_plotly
@@ -1303,6 +1324,7 @@ def server(input, output, session):
                                       hovertemplate=("%{y}<br>%{x}<br>Covariance: %{z:.3f}<extra></extra>"),))
         figure.update_layout(title="Sensor covariance matrix implied by the variogram",
                              margin=dict(l=190, r=35, t=70, b=180),
+                             height=750, autosize=True,
                              xaxis={"tickangle": -45},)
         return figure
 
@@ -1330,6 +1352,7 @@ def server(input, output, session):
         figure.add_vline(x=0, line_color="#333333", line_width=1.5)
         figure.update_layout(title=("Local contribution = observed mean − leave-one-out background"),
                              xaxis_title="Estimated local contribution (µg/m³)", yaxis_title=None,
+                             height=750, autosize=True,
                              margin=dict(l=210, r=35, t=70, b=60),)
         return figure
 
