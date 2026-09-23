@@ -1,14 +1,20 @@
+import os
+# Shiny renders plots in a server process. The non-interactive Agg backend
+# avoids Windows/Tk errors such as "main thread is not in main loop".
+os.environ["MPLBACKEND"] = "Agg"
+import matplotlib
+matplotlib.use("Agg", force=True)
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import contextily as cx
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import contextily as cx
 import plotly.graph_objects as go
-import matplotlib.pyplot as plt
-import hashlib
 
 from ipyleaflet import CircleMarker, Map, basemaps
 from ipywidgets import Layout
@@ -17,23 +23,22 @@ from shinywidgets import output_widget, render_plotly, render_widget
 from pyproj import Transformer
 from geopy.distance import geodesic
 
+
 # File functions/errors imported
 from data_sources import (
     get_defra_readings,
-    get_sensor_metadata,
     get_uo_readings,
     load_sensor_registry,
 )
 from kriging import KrigingError, run_kriging_analysis
+from GPR_single_sensor import forecast_single_sensor_gp
 
 APP_DIR = Path(__file__).resolve().parent
 PM25_THRESHOLD = 10.0
-DEMO_FORECAST_HOURS = 24
-WEB_MERCATOR_TRANSFORMER = Transformer.from_crs(
-    "EPSG:4326",
-    "EPSG:3857",
-    always_xy=True,
-)
+GP_FORECAST_HOURS = 24
+GP_TRAINING_HOURS = 168
+BASEMAP_FILE = APP_DIR / "newcastle_basemap_small.tif"
+BNG_TRANSFORMER = Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True,)
 
 registry = load_sensor_registry(APP_DIR / "naming.csv")
 
@@ -45,7 +50,7 @@ DEFAULT_UO_MON = next(iter(UO_MON_CHOICES), None,)
 
 
 def closest_sensor(locations_1, locations_2):
-    """Find the closest sensor in locations_2 for each sensor in locations_1."""
+    # Find the closest sensor in locations_2 for each sensor in locations_1
     results = []
 
     locations_1 = locations_1.dropna(subset=["sensor_name", "latitude", "longitude"])
@@ -73,10 +78,21 @@ def closest_sensor(locations_1, locations_2):
     return distances.loc[closest_indices].reset_index(drop=True)
 
 
-app_ui = ui.page_fillable(
+def load_readings(row, start, end, variable="PM2.5"):
+    # Load one sensor using the correct provider-specific data source.
 
-    ui.tags.style(
-        """
+    if str(row["provider"]).startswith("UO-"):
+        return get_uo_readings(sensor_name=row["sensor_name"], 
+                               start=start, end=end,
+                               variable=variable,)
+
+    return get_defra_readings(site_code=row["code"],
+                              start=start, end=end,
+                              variable=variable, source_type=row["type"],)
+
+
+app_ui = ui.page_fillable(
+    ui.tags.style("""
         .app-header {
             display: flex;
             align-items: center;
@@ -237,40 +253,23 @@ app_ui = ui.page_fillable(
             ),
             value="validation"
         ),
-        ui.nav_panel(
-            "Kriging",
+        ui.nav_panel("Kriging",
             ui.layout_sidebar(
-                ui.sidebar(
-                    ui.h4("Spatial PM2.5 background"),
-                    ui.input_select(
-                        "kriging_window",
-                        "Averaging window",
-                        choices={
-                            "24": "Last 24 hours",
-                            "168": "Last 7 days",
-                            "720": "Last 30 days",
-                        },
-                        selected="168",
-                    ),
-                    ui.input_select(
-                        "kriging_model",
-                        "Variogram model",
-                        choices={
-                            "exponential": "Exponential",
-                            "spherical": "Spherical",
-                            "gaussian": "Gaussian",
-                        },
-                        selected="exponential",
-                    ),
-                    ui.input_radio_buttons(
-                        "kriging_parameter_mode",
-                        "Variogram parameters",
-                        choices={
-                            "auto": "Automatic",
-                            "manual": "Manual",
-                        },
-                        selected="auto",
-                    ),
+                ui.sidebar(ui.h4("Spatial PM2.5 background"),
+                           ui.input_select("kriging_window", "Averaging window",
+                                           choices={"24": "Last 24 hours",
+                                                    "168": "Last 7 days",
+                                                    "720": "Last 30 days",},
+                                           selected="168",),
+                           ui.input_select("kriging_model", "Variogram model",
+                                           choices={"exponential": "Exponential",
+                                                    "spherical": "Spherical",
+                                                    "gaussian": "Gaussian",},
+                                           selected="exponential",),
+                           ui.input_radio_buttons("kriging_parameter_mode", "Variogram parameters",
+                                                  choices={"auto": "Automatic",
+                                                           "manual": "Manual",},
+                                                   selected="auto",),
                     ui.panel_conditional(
                         "input.kriging_parameter_mode === 'manual'",
                         ui.input_slider(
@@ -352,12 +351,12 @@ def empty_static_plot(message):
     figure.tight_layout()
     return figure
 
-def static_kriging_map(grid_longitude, grid_latitude, values, stations, title, colour_map, colourbar_title,colour_limits=None,):
-    # Static kriging map over OpenStreetMap
-    # Convert the kriging grid to Web Mercator.
-    grid_x, grid_y = WEB_MERCATOR_TRANSFORMER.transform(grid_longitude, grid_latitude,)
+    
+def static_kriging_map(grid_longitude, grid_latitude, values, stations, title, colour_map, colourbar_title, colour_limits=None,):
+    # Draw a static kriging surface over an optional OSM background."""
+    grid_x, grid_y = BNG_TRANSFORMER.transform(grid_longitude, grid_latitude,)
     # Convert sensor coordinates to Web Mercator.
-    sensor_x, sensor_y = WEB_MERCATOR_TRANSFORMER.transform(stations["longitude"].to_numpy(), stations["latitude"].to_numpy(),)
+    sensor_x, sensor_y = BNG_TRANSFORMER.transform(stations["longitude"].to_numpy(), stations["latitude"].to_numpy(),)
     if colour_limits is None:
         colour_min = float(np.nanmin(values))
         colour_max = float(np.nanmax(values))
@@ -370,12 +369,19 @@ def static_kriging_map(grid_longitude, grid_latitude, values, stations, title, c
     contour_levels = np.linspace(colour_min, colour_max, 25,)
     figure, axis = plt.subplots(figsize=(10, 8), dpi=120,)
     # Set the geographical area before adding the basemap.
-    x_padding = (np.nanmax(grid_x) - np.nanmin(grid_x)) * 0.03
-    y_padding = (np.nanmax(grid_y) - np.nanmin(grid_y)) * 0.03
-    axis.set_xlim(np.nanmin(grid_x) - x_padding, np.nanmax(grid_x) + x_padding,)
-    axis.set_ylim(np.nanmin(grid_y) - y_padding, np.nanmax(grid_y) + y_padding,)
-    # Static OpenStreetMap background.
-    cx.add_basemap(axis, source=cx.providers.OpenStreetMap.Mapnik, zoom=11,)
+    valid = np.isfinite(sensor_x) & np.isfinite(sensor_y)
+    if not valid.any():
+        return
+    sensor_x = sensor_x[valid]
+    sensor_y = sensor_y[valid]
+    axis.set_xlim(np.min(sensor_x) - 2500, np.max(sensor_x) + 2500,)
+    axis.set_ylim(np.min(sensor_y) - 2500, np.max(sensor_y) + 2500,)
+    axis.set_facecolor("#eeeeee")
+    if BASEMAP_FILE.exists():
+        try:
+            cx.add_basemap(axis, source=str(BASEMAP_FILE), crs="EPSG:27700", reset_extent=True,)
+        except Exception as exc:
+            print(f"Could not read {BASEMAP_FILE.name}: {exc}")
     # Kriging surface.
     filled_contours = axis.contourf(grid_x, grid_y, values, levels=contour_levels, 
                                     cmap=colour_map, vmin=colour_min, vmax=colour_max, alpha=0.62,
@@ -420,7 +426,7 @@ def server(input, output, session):
 
     @reactive.calc
     def sensors():
-        sensor_df = get_sensor_metadata(registry).copy()
+        sensor_df = registry.copy()
         sensor_df["latitude"] = pd.to_numeric(sensor_df["latitude"],
                                               errors="coerce",)
         sensor_df["longitude"] = pd.to_numeric(sensor_df["longitude"],
@@ -444,14 +450,12 @@ def server(input, output, session):
             marker_colour = colours.get(row.provider, "#555555",)
             marker = CircleMarker(location=(float(row.latitude),
                                             float(row.longitude),),
-                radius=8,
-                color=marker_colour,
-                fill_color=marker_colour,
-                fill_opacity=0.85,
-                weight=2,
-                title=row.display_name,
-            )
-
+                                  radius=8,
+                                  color=marker_colour,
+                                  fill_color=marker_colour,
+                                  fill_opacity=0.85,
+                                  weight=2,
+                                  title=row.display_name,)
             sensor_id = row.sensor_name
             def choose_sensor(_sensor_id=sensor_id,**_kwargs,):
                 selected_sensor.set(_sensor_id)
@@ -482,12 +486,12 @@ def server(input, output, session):
 
             start_date, end_date = (selected_dates)
             start = datetime.combine(start_date,
-                                    datetime.min.time(),
-                                    tzinfo=timezone.utc,)
+                                     datetime.min.time(),
+                                     tzinfo=timezone.utc,)
             # Include the whole final day.
             end = datetime.combine(end_date + timedelta(days=1),
-                                    datetime.min.time(),
-                                    tzinfo=timezone.utc,)
+                                   datetime.min.time(),
+                                   tzinfo=timezone.utc,)
         else:
             hours = int(input.period())
             end = datetime.now(timezone.utc)
@@ -503,34 +507,21 @@ def server(input, output, session):
             return pd.DataFrame()
 
         start, end = interval
-        if row["provider"].startswith("UO-"):
-            readings = get_uo_readings(sensor_name=(row["sensor_name"]),
-                                       start=start,
-                                       end=end,
-                                       variable=input.variable(),)
-        else:
-            readings = get_defra_readings(site_code=row["code"],
-                                          start=start,
-                                          end=end,
-                                          variable=input.variable(),
-                                          source_type=row["type"],)
+        readings = load_readings(row=row,
+                                 start=start, end=end,
+                                 variable=input.variable(),)
         if readings.empty:
             return readings
-
         readings = readings.copy()
-        readings["Timestamp"] = (pd.to_datetime(readings["Timestamp"],
-                                                utc=True,
-                                                errors="coerce",)
-                                                )
-        readings["Value"] = (pd.to_numeric(readings["Value"],
-                                           errors="coerce",)
-                                           )
-        return (readings.dropna(subset=["Timestamp","Value",])
-                .sort_values("Timestamp"))
+        readings["Timestamp"] = pd.to_datetime(readings["Timestamp"],
+                                               utc=True, errors="coerce",)
+        readings["Value"] = pd.to_numeric(readings["Value"], errors="coerce",)
+
+        return readings.dropna(subset=["Timestamp", "Value",]).sort_values("Timestamp")
 
     @reactive.calc
     def validation_pair():
-        """Find the selected UO-Mon sensor and its closest reference sensor."""
+        # Find the selected UO-Mon sensor and its closest sensor
         selected_name = input.validation_uo_sensor()
         if not selected_name:
             return None
@@ -563,7 +554,7 @@ def server(input, output, session):
 
     @reactive.calc
     def validation_data():
-        """Download and pair hourly PM2.5 observations."""
+        # Download and pair hourly PM2.5 observations
         pair = validation_pair()
 
         if pair is None:
@@ -574,15 +565,12 @@ def server(input, output, session):
         start = end - timedelta(days=days)
         uo_row = pair["uo"]
         reference_row = pair["reference"]
-        uo_data = get_uo_readings(sensor_name=uo_row["sensor_name"],
-                                  start=start,
-                                  end=end,
-                                  variable="PM2.5",)
-        reference_data = get_defra_readings(site_code=reference_row["code"],
-                                            start=start,
-                                            end=end,
-                                            variable="PM2.5",
-                                            source_type=reference_row["type"],)
+        uo_data = load_readings(row=uo_row,
+                                start=start, end=end,
+                                variable="PM2.5",)
+        reference_data = load_readings(row=reference_row,
+                                       start=start, end=end,
+                                       variable="PM2.5",)
 
         if uo_data.empty or reference_data.empty:
             return pd.DataFrame()
@@ -613,7 +601,7 @@ def server(input, output, session):
     @reactive.effect
     @reactive.event(input.run_kriging)
     def load_kriging_snapshot():
-        """Fetch one common-window PN2.5 average for every available sensor"""
+        # Fetch one common-window PN2.5 average for every available sensor
         window_hours=int(input.kriging_window())
         end = datetime.now(timezone.utc)
         start = end - timedelta(hours=window_hours)
@@ -625,17 +613,9 @@ def server(input, output, session):
         # Gets sensor data for one sensor, and spits out the mean
         def load_one_sensor(row):
             try:
-                if str(row["provider"]).startswith("UO-"):
-                    readings = get_uo_readings(sensor_name=row["sensor_name"],
-                                               start=start,
-                                               end=end,
-                                               variable="PM2.5")
-                else:
-                    readings = get_defra_readings(site_code=row["code"],
-                                                  start=start,
-                                                  end=end,
-                                                  variable="PM2.5",
-                                                  source_type=row["type"])
+                readings = load_readings(row=row,
+                                         start=start, end=end,
+                                         variable="PM2.5",)
             except Exception as exc:
                 return None, f'{row["display_name"]}: {exc}'
                 
@@ -669,14 +649,9 @@ def server(input, output, session):
         
                     with ThreadPoolExecutor(max_workers=worker_count) as executor:
                         futures = {
-                            executor.submit(load_one_sensor, row): row
-                            for row in sensor_records
-                        }
+                            executor.submit(load_one_sensor, row): row for row in sensor_records}
         
-                        for completed_count, future in enumerate(
-                            as_completed(futures),
-                            start=1,
-                        ):
+                        for completed_count, future in enumerate(as_completed(futures), start=1,):
                             row = futures[future]
                             try:
                                 result, error = future.result()
@@ -692,25 +667,19 @@ def server(input, output, session):
                             progress.set(
                                 completed_count,
                                 message="Loading PM2.5 sensor averages",
-                                detail=(
-                                    f"{completed_count} of {len(sensor_records)} sensors"
-                                ),
+                                detail=f"{completed_count} of {len(sensor_records)} sensors",
                             )
         
         snapshot = pd.DataFrame(loaded)
         if not snapshot.empty:
             snapshot = snapshot.sort_values("display_name").reset_index(drop=True)
         # Stores all available, attempted and unavailable sensor mean data for PM2.5 in the time interval
-        kriging_snapshot_state.set(
-            {
-                "data": snapshot,
-                "attempted": len(sensor_records),
-                "unavailable": unavailable,
-                "start": start,
-                "end": end,
-                "window_hours": window_hours,
-            }
-        )
+        kriging_snapshot_state.set({"data": snapshot,
+                                    "attempted": len(sensor_records),
+                                    "unavailable": unavailable,
+                                    "start": start,
+                                    "end": end,
+                                    "window_hours": window_hours,})
 
     # Run kriging analysis
     @reactive.calc
@@ -801,7 +770,7 @@ def server(input, output, session):
             coords = (f'{row["latitude"]:.6f},'
                       f'{row["longitude"]:.6f}')
 
-        return ui.div(ui.div(ui.strong("Network: "),row["provider"],),
+        return ui.div(ui.div(ui.strong("Network: "), row["provider"],),
                       ui.div(ui.strong("Sensor reference: "),
                              ui.code(row["sensor_name"]),
                              ),
@@ -1086,68 +1055,32 @@ def server(input, output, session):
                             name=("Linear trend " f"({slope:+.2f} " "µg/m³/day)"),
                             line={"color": "#6a3d9a", "width": 2, "dash": "dash",},)
 
-        # -------------------------------------------------
-        # Temporary Gaussian random-walk demonstration
-        # -------------------------------------------------
+        # Single sensor GP prediction
 
-        if len(plot_data) >= 2:
-            time_differences = (plot_data["Timestamp"]
-                                .diff()
-                                .dropna())
-            forecast_interval = (time_differences.median())
+        try:
+            gp_forecast = forecast_single_sensor_gp(
+                plot_data,
+                forecast_hours=GP_FORECAST_HOURS,
+                training_hours=GP_TRAINING_HOURS,
+            )
+        except Exception as exc:
+            # A failed forecast should not remove the observed time series.
+            print(f"Could not fit GP forecast for {row['sensor_name']}: {exc}")
+            gp_forecast = pd.DataFrame()
 
-            # Protect against unusual gaps in the data.
-            if (pd.isna(forecast_interval) or forecast_interval <= pd.Timedelta(0)):
-                forecast_interval = pd.Timedelta(hours=1)
-
-            forecast_interval = max(forecast_interval, pd.Timedelta(minutes=1),)
-            forecast_interval = min(forecast_interval, pd.Timedelta(hours=6),)
-            forecast_steps = max(1, int(pd.Timedelta(hours=DEMO_FORECAST_HOURS) / forecast_interval),)
-            observed_differences = (plot_data["Value"]
-                                    .diff()
-                                    .dropna())
-            step_sigma = (observed_differences.std())
-
-            if (pd.isna(step_sigma) or step_sigma <= 0):
-                step_sigma = max(plot_data["Value"].std() * 0.05,0.1,)
-
-            # Generate a stable seed for this sensor to prevent the projection changing whenever a checkbox is selected.
-            seed_text = (f'{row["sensor_name"]}-' f'{plot_data["Timestamp"].iloc[-1]}')
-            seed = int.from_bytes(hashlib.sha256(seed_text.encode("utf-8")).digest()[:8],
-                                  byteorder="little",)
-            random_generator = (np.random.default_rng(seed))
-            number_of_simulations = 1000
-            random_steps = (random_generator.normal(loc=0.0, scale=step_sigma, size=(number_of_simulations, forecast_steps,)))
+        if not gp_forecast.empty:
+            last_timestamp = plot_data["Timestamp"].iloc[-1]
             last_value = float(plot_data["Value"].iloc[-1])
 
-            # PM2.5 concentrations cannot be negative.
-            simulated_paths = (last_value + np.cumsum(random_steps, axis=1,))
-            simulated_paths = np.maximum(simulated_paths, 0.0,)
-            forecast_values = simulated_paths[0]
-            # Pointwise 95% prediction interval.
-            lower_interval = np.percentile(simulated_paths, 2.5, axis=0,)
-            upper_interval = np.percentile(simulated_paths, 97.5, axis=0,)
-            last_timestamp = (plot_data["Timestamp"].iloc[-1])
-            forecast_times = pd.date_range(start=(last_timestamp+ forecast_interval),
-                                           periods=forecast_steps,
-                                           freq=forecast_interval,)
-
-            # Include the final observed value so the
-            # projection joins onto the observed series.
-            connected_times = [last_timestamp, *forecast_times,]
-            connected_values = [last_value, *forecast_values,]
-            connected_lower = [last_value, *lower_interval,]
-            connected_upper = [last_value, *upper_interval,]
-
-            # Invisible lower boundary.
-            fig.add_scatter(x=connected_times, y=connected_lower,
+            # Lower boundary for the shaded prediction interval.
+            fig.add_scatter(x=gp_forecast["Timestamp"], y=gp_forecast["lower_95"],
                             mode="lines",
                             line={"width": 0,},
                             hoverinfo="skip",
                             showlegend=False,)
 
             # Upper boundary filled down to the lower boundary.
-            fig.add_scatter(x=connected_times, y=connected_upper,
+            fig.add_scatter(x=gp_forecast["Timestamp"], y=gp_forecast["upper_95"],
                             mode="lines",
                             line={"width": 0,},
                             fill="tonexty",
@@ -1156,17 +1089,14 @@ def server(input, output, session):
                             hovertemplate=("%{x}<br>"
                                            "Upper interval: %{y:.2f} µg/m³"
                                            "<extra></extra>"),)
-
-            fig.add_scatter(x=connected_times, y=connected_values,
+            # Add the final observation at the start so that the forecast
+            # joins cleanly to the measured time series.
+            fig.add_scatter(x=[last_timestamp, *gp_forecast["Timestamp"]], y=[last_value, *gp_forecast["prediction"]],
                             mode="lines",
-                            name=("Demo projection"),
-                            line={"color": "#e31a1c", "width": 2,},
-                            hovertemplate=("%{x}<br>"
-                                           "Demo projection: %{y:.2f} µg/m³"
+                            name="Single-sensor GP forecast",
+                            line={"color": "#e31a1c", "width": 2},
+                            hovertemplate=("%{x}<br>GP forecast: %{y:.2f} µg/m³"
                                            "<extra></extra>"),)
-
-            # Mark where observed data end and the
-            # demonstration projection begins.
             fig.add_vline(x=last_timestamp, 
                          line_color="#555555",
                          line_width=1.5,

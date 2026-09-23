@@ -1,4 +1,4 @@
-# Ignore OneDrive temp files, csv
+# Ignore OneDrive temp files, csv, tif
 *.~*
 .~*
 *.tmp
@@ -11,6 +11,8 @@ Thumbs.db
 *.log
 *.msg
 *.png
+*.tif
+newcastle_sensor_app/*.tif
 
 # Ignore specific folders
 Newcastle_altitude/
@@ -21,4 +23,5 @@ Week_March_2026_Monitor_Mesh/
 Week_March_2026_NO/
 gp_results_update/
 _MACOSX/
-
+newcastle_sensor_app/test/
+sensor_report_files/
