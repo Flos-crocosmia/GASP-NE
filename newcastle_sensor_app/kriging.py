@@ -75,7 +75,7 @@ def spatial_correlation(distance, model, range_km):
 def covariance(distance, model, range_km, sill, nugget_fraction, diagonal=False):
     # Construct covariance from distance.
     # Sill is divided into spatially correlated variance and nugget variance.
-    # Nugget is added only when constructing a sensor-by-sensor matrix i.e. square
+    # Nugget is added only when constructing a sensor-by-sensor matrix i.e. squ
     nugget = sill * nugget_fraction
     spatial_variance = sill - nugget
     result = spatial_variance * spatial_correlation(distance, model, range_km,)
