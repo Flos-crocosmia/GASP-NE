@@ -30,7 +30,7 @@ from data_sources import (
     get_uo_readings,
     load_sensor_registry,
 )
-from kriging import KrigingError, run_kriging_analysis
+from kriging import run_kriging_analysis
 from GPR_single_sensor import forecast_single_sensor_gp
 
 APP_DIR = Path(__file__).resolve().parent
@@ -264,7 +264,8 @@ app_ui = ui.page_fillable(
                            ui.input_select("kriging_model", "Variogram model",
                                            choices={"exponential": "Exponential",
                                                     "spherical": "Spherical",
-                                                    "gaussian": "Gaussian",},
+                                                    "gaussian": "Gaussian",
+                                                    "matern32": "Matern 3/2"},
                                            selected="exponential",),
                            ui.input_radio_buttons("kriging_parameter_mode", "Variogram parameters",
                                                   choices={"auto": "Automatic",

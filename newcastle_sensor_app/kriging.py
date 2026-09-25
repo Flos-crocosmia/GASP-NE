@@ -1,32 +1,22 @@
-"""Simple ordinary kriging for the GASP-NE app.
-
-The input is one mean PM2.5 value per sensor. The main function returns:
-
-* a spatial background surface;
-* prediction uncertainty;
-* the covariance matrix;
-* an empirical and model variogram;
-* leave-one-out background estimates and local contributions; and
-* a validation result for Newcastle Centre (code ``NEWC``).
-
-"""
+# Ordinary kriging for the GASP-NE app.
+# The input is one mean PM2.5 value per sensor. The main function returns:
+#    - a spatial background surface;
+#    - prediction uncertainty;
+#    - the covariance matrix;
+#    - an empirical and model variogram;
+#    - leave-one-out background estimates and local contributions
+#    - a validation result for Newcastle Centre (code ``NEWC``).
 
 from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 
 MINIMUM_SENSOR_COUNT = 4
-SUPPORTED_MODELS = {"exponential", "gaussian", "spherical"}
-
-
-class KrigingError(ValueError):
-    """Raised when there is not enough valid data to run kriging."""
+SUPPORTED_MODELS = {"exponential", "gaussian", "spherical", "matern"}
 
 # Just to avoid a dictionary ouput
 @dataclass
 class KrigingAnalysis:
-    """Results used by the plots in app.py."""
     stations: pd.DataFrame
     grid_longitude: np.ndarray
     grid_latitude: np.ndarray
@@ -47,13 +37,13 @@ class KrigingAnalysis:
 
 
 def pairwise_distance(first, second):
-    """Euclidean distance between every point."""
+    # Euclidean distance between every point
     difference = first[:, None, :] - second[None, :, :]
     return np.sqrt(np.sum(difference**2, axis=2))
 
 
 def local_coordinates(latitude, longitude):
-    """Convert latitude/longitude to approximate local x/y distances in km."""
+    # Convert latitude/longitude to approximate local x/y distances in km
     latitude_origin = float(np.mean(latitude))
     longitude_origin = float(np.mean(longitude))
     km_per_degree_lon = 111.320 * np.cos(np.deg2rad(latitude_origin))
@@ -64,7 +54,7 @@ def local_coordinates(latitude, longitude):
 
 
 def spatial_correlation(distance, model, range_km):
-    """Convert distance into a correlation between zero and one."""
+    # Convert distance into a correlation between zero and one
     scaled_distance = np.asarray(distance, dtype=float) / range_km
     if model == "exponential":
         return np.exp(-scaled_distance)
@@ -76,15 +66,16 @@ def spatial_correlation(distance, model, range_km):
         h = scaled_distance[inside_range]
         correlation[inside_range] = 1 - 1.5 * h + 0.5 * h**3
         return correlation
+    if model == "matern32":
+        correlation = (1 + np.sqrt(3)*scaled_distance)*np.exp(-np.sqrt(3)*scaled_distance)
+        return correlation
     
-    raise KrigingError(f"Unknown covariance model: {model}")
 
 
 def covariance(distance, model, range_km, sill, nugget_fraction, diagonal=False):
-    """Construct covariance from distance.
-    The sill is divided into spatially correlated variance and nugget variance.
-    The nugget is added only when constructing a sensor-by-sensor matrix i.e. square
-    """
+    # Construct covariance from distance.
+    # Sill is divided into spatially correlated variance and nugget variance.
+    # Nugget is added only when constructing a sensor-by-sensor matrix i.e. square
     nugget = sill * nugget_fraction
     spatial_variance = sill - nugget
     result = spatial_variance * spatial_correlation(distance, model, range_km,)
@@ -94,7 +85,7 @@ def covariance(distance, model, range_km, sill, nugget_fraction, diagonal=False)
 
 
 def ordinary_kriging(sensor_xy, sensor_values, target_xy, model, range_km, sill, nugget_fraction,):
-    """Predict values and variances at target locations."""
+    # Predict values and variances at target locations
     number_of_sensors = len(sensor_values)
     # Covariance between the observed sensors.
     sensor_covariance = covariance(pairwise_distance(sensor_xy, sensor_xy),
@@ -129,9 +120,8 @@ def ordinary_kriging(sensor_xy, sensor_values, target_xy, model, range_km, sill,
 
 
 def leave_one_out(stations, xy, values, model, range_km, sill, nugget_fraction):
-    """Predict each sensor without using that sensor in its own prediction."""
+    # Predict each sensor without using that sensor in its own prediction
     rows = []
-
     for index in range(len(stations)):
         keep = np.arange(len(stations)) != index
         prediction, variance = ordinary_kriging(xy[keep], values[keep], xy[index : index + 1], model, range_km, sill, nugget_fraction,)
@@ -160,8 +150,10 @@ def leave_one_out(stations, xy, values, model, range_km, sill, nugget_fraction):
     return result
 
 
+
+
 def empirical_variogram(xy, values):
-    """Calculate binned semivariance between observed sensor pairs."""
+    # Calculate binned semivariance between observed sensor pairs
     distance_matrix = pairwise_distance(xy, xy)
     row, column = np.triu_indices(len(values), k=1)
     distances = distance_matrix[row, column]
@@ -178,24 +170,13 @@ def empirical_variogram(xy, values):
             records.append({"distance_km": float(np.mean(distances[selected])),
                             "semivariance": float(np.mean(semivariance[selected])),
                             "pair_count": int(np.sum(selected)),})
-
+            
     return pd.DataFrame(records)
 
 
 def run_kriging_analysis(sensor_values, *, model="exponential", parameter_mode="auto", range_km=10.0, nugget_fraction=0.10, grid_size=65, validation_code="NEWC",):
-    """Run the complete spatial analysis.
-    Automatic mode deliberately uses a simple rule instead of a
-    hidden optimisation: the length scale is the median distance between
-    sensor pairs and the nugget is 10% of the sample variance.
-    """
-
-    required_columns = {"sensor_name", "display_name", "provider", "latitude", "longitude", "Value",}
-    missing = required_columns.difference(sensor_values.columns)
-    if missing:
-        raise KrigingError("Missing columns: " + ", ".join(sorted(missing)))
-
-    if model not in SUPPORTED_MODELS:
-        raise KrigingError(f"Unknown covariance model: {model}")
+    # Run the complete spatial analysis.
+    # Automatic mode deliberately uses length scale as the median distance between sensor pairs and the nugget is 10% of the sample variance.
 
     stations = sensor_values.copy()
     for column in ["latitude", "longitude", "Value"]:
@@ -206,10 +187,8 @@ def run_kriging_analysis(sensor_values, *, model="exponential", parameter_mode="
                 .reset_index(drop=True))
 
     if len(stations) < MINIMUM_SENSOR_COUNT:
-        raise KrigingError(
-            f"At least {MINIMUM_SENSOR_COUNT} valid sensors are required; "
-            f"only {len(stations)} were available."
-        )
+        raise ValueError(f"At least {MINIMUM_SENSOR_COUNT} valid sensors are required; "
+                         f"only {len(stations)} were available.")
 
     latitude = stations["latitude"].to_numpy(float)
     longitude = stations["longitude"].to_numpy(float)
@@ -225,7 +204,7 @@ def run_kriging_analysis(sensor_values, *, model="exponential", parameter_mode="
         pair_distances = sensor_distances[np.triu_indices(len(xy), k=1)]
         pair_distances = pair_distances[pair_distances > 1e-6]
         if len(pair_distances) == 0:
-            raise KrigingError("The sensor locations are not distinct.")
+            raise ValueError("The sensor locations are not distinct.")
 
         range_km = float(np.median(pair_distances))
         nugget_fraction = 0.10
@@ -234,9 +213,9 @@ def run_kriging_analysis(sensor_values, *, model="exponential", parameter_mode="
     nugget_fraction = float(nugget_fraction)
 
     if range_km <= 0:
-        raise KrigingError("The spatial length scale must be positive.")
+        raise ValueError("The spatial length scale must be positive.")
     if not 0 <= nugget_fraction < 1:
-        raise KrigingError("The nugget fraction must be between 0 and 1.")
+        raise ValueError("The nugget fraction must be between 0 and 1.")
 
     # Leave-one-out results define the local contribution at every sensor.
     local_contributions = leave_one_out(stations, xy, values, model, range_km, sill, nugget_fraction,)
