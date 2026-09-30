@@ -11,13 +11,15 @@ from pathlib import Path
 
 import contextily as cx
 import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize, to_hex
+from matplotlib.path import Path as MatplotlibPath
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from ipyleaflet import CircleMarker, Map, basemaps
-from ipywidgets import Layout
+from ipyleaflet import CircleMarker, Map, basemaps, LayerGroup, LayersControl, Polygon, WidgetControl
+from ipywidgets import Layout, HTML
 from shiny import App, reactive, render, ui
 from shinywidgets import output_widget, render_plotly, render_widget
 from pyproj import Transformer
@@ -89,6 +91,28 @@ def load_readings(row, start, end, variable="PM2.5"):
     return get_defra_readings(site_code=row["code"],
                               start=start, end=end,
                               variable=variable, source_type=row["type"],)
+
+# taken from https://stackoverflow.com/questions/65634602/plotting-contours-with-ipyleaflet
+def split_contours(segments, kinds=None):
+    # Separate disconnected Matplotlib contour paths
+    if kinds is None:
+        return segments # nothing to be done
+    separated = []
+    for vertices, path_codes in zip(segments, kinds):
+        start = 0
+        # CLOSEPOLY marks the end of one polygon ring.
+        closing_points = np.flatnonzero(path_codes == MatplotlibPath.CLOSEPOLY)
+        for end in closing_points:
+            ring = vertices[start:end]
+            if len(ring) >= 3:
+                separated.append(ring)
+            start = end + 1
+        # Protect against a final path without CLOSEPOLY.
+        if start < len(vertices):
+            ring = vertices[start:]
+            if len(ring) >= 3:
+                separated.append(ring)
+    return separated
 
 
 app_ui = ui.page_fillable(
@@ -309,11 +333,11 @@ app_ui = ui.page_fillable(
                 ui.navset_card_tab(
                     ui.nav_panel(
                         "Background",
-                        ui.output_plot("kriging_surface", height="700px",),
+                        output_widget("kriging_surface", height="700px",),
                     ),
                     ui.nav_panel(
                         "Uncertainty",
-                        ui.output_plot("kriging_uncertainty", height="700px"),
+                        output_widget("kriging_uncertainty", height="700px"),
                     ),
                     #ui.nav_panel(
                     #    "Variogram",
@@ -353,11 +377,17 @@ def empty_static_plot(message):
     return figure
 
     
-def static_kriging_map(grid_longitude, grid_latitude, values, stations, title, colour_map, colourbar_title, colour_limits=None,):
-    # Draw a static kriging surface over an optional OSM background."""
-    grid_x, grid_y = BNG_TRANSFORMER.transform(grid_longitude, grid_latitude,)
-    # Convert sensor coordinates to Web Mercator.
-    sensor_x, sensor_y = BNG_TRANSFORMER.transform(stations["longitude"].to_numpy(), stations["latitude"].to_numpy(),)
+def kriging_map(grid_longitude, grid_latitude, values, stations, title, colour_map, colour_limits=None,):
+    # Convert a kriging contour surface into an interactive Leaflet map.
+
+    valid_stations = stations.dropna(subset=["latitude", "longitude"]).copy()
+    map_widget = Map(center=(54.9783, -1.6178), zoom=11,
+                     basemap=basemaps.OpenStreetMap.Mapnik,
+                     scroll_wheel_zoom=True,
+                     layout=Layout(height="650px", width="100%"),)
+    if valid_stations.empty:
+        return map_widget
+
     if colour_limits is None:
         colour_min = float(np.nanmin(values))
         colour_max = float(np.nanmax(values))
@@ -366,43 +396,58 @@ def static_kriging_map(grid_longitude, grid_latitude, values, stations, title, c
 
     if colour_max <= colour_min:
         colour_max = colour_min + 0.001
+    contour_levels = np.linspace(colour_min, colour_max, 20,)
+    # Matplotlib calculates the contour polygons.
+    figure, axis = plt.subplots()
+    contour_set = axis.contourf(grid_longitude, grid_latitude,
+                                values, levels=contour_levels,)
+    plt.close(figure)
+    colourmap = plt.get_cmap(colour_map)
+    normalise = Normalize(vmin=colour_min, vmax=colour_max,)
+    contour_layers = []
+    for level_index, segments in enumerate(contour_set.allsegs):
+        if level_index >= len(contour_set.levels) - 1:
+            break
+        kinds = None
+        if contour_set.allkinds is not None:
+            kinds = contour_set.allkinds[level_index]
+        lower_level = contour_set.levels[level_index]
+        upper_level = contour_set.levels[level_index + 1]
+        middle_level = (lower_level + upper_level) / 2
+        contour_colour = to_hex(colourmap(normalise(middle_level)))
+        matplotlib_polygons = split_contours(segments, kinds,)
 
-    contour_levels = np.linspace(colour_min, colour_max, 25,)
-    figure, axis = plt.subplots(figsize=(10, 8), dpi=120,)
-    # Set the geographical area before adding the basemap.
-    valid = np.isfinite(sensor_x) & np.isfinite(sensor_y)
-    if not valid.any():
-        return
-    sensor_x = sensor_x[valid]
-    sensor_y = sensor_y[valid]
-    axis.set_xlim(np.min(sensor_x) - 2500, np.max(sensor_x) + 2500,)
-    axis.set_ylim(np.min(sensor_y) - 2500, np.max(sensor_y) + 2500,)
-    axis.set_facecolor("#eeeeee")
-    if BASEMAP_FILE.exists():
-        try:
-            cx.add_basemap(axis, source=str(BASEMAP_FILE), crs="EPSG:27700", reset_extent=True,)
-        except Exception as exc:
-            print(f"Could not read {BASEMAP_FILE.name}: {exc}")
-    # Kriging surface.
-    filled_contours = axis.contourf(grid_x, grid_y, values, levels=contour_levels, 
-                                    cmap=colour_map, vmin=colour_min, vmax=colour_max, alpha=0.62,
-                                    extend="both", zorder=2,)
-    # Faint contour boundaries.
-    axis.contour(grid_x, grid_y, values,
-                 levels=contour_levels[::3], colors="#333333", linewidths=0.4, alpha=0.45, zorder=3,)
-    # stations.
-    axis.scatter(sensor_x, sensor_y, s=45, color="#111111",
-                 edgecolor="white", linewidth=0.8, label="Monitoring stations", zorder=4,)
-    colourbar = figure.colorbar(filled_contours, ax=axis,
-                                shrink=0.8,
-                                pad=0.02,)
-    colourbar.set_label(colourbar_title)
-    axis.set_title(title, fontsize=14, pad=12,)
-    axis.legend(loc="upper right", framealpha=0.9,)
-    axis.set_axis_off()
-    figure.tight_layout()
+        # Matplotlib gives (longitude, latitude).
+        # Leaflet requires (latitude, longitude).
+        leaflet_polygons = [[[float(latitude), float(longitude)] for longitude, latitude in polygon] for polygon in matplotlib_polygons]
+        if not leaflet_polygons:
+            continue
+        contour_layers.append(Polygon(locations=leaflet_polygons,
+                                      color=contour_colour, weight=1, opacity=0.4,
+                                      fill_color=contour_colour,
+                                      fill_opacity=0.55,))
 
-    return figure
+    # Add all contour polygons once.
+    if contour_layers:
+        map_widget.add(LayerGroup(layers=tuple(contour_layers), name=title,))
+    station_layers = []
+    for row in valid_stations.itertuples():
+        station_layers.append(CircleMarker(location=(float(row.latitude),
+                                                     float(row.longitude),),
+                                           radius=6, color="white", weight=2,
+                                           fill_color="#111111",
+                                           fill_opacity=1.0,
+                                           tooltip=getattr(row,
+                                                           "display_name",
+                                                           "Monitoring station",),))
+
+    # Add sensor markers once.
+    if station_layers:
+        map_widget.add(LayerGroup(layers=tuple(station_layers), name="Monitoring stations",))
+
+    map_widget.add(LayersControl(position="topright"))
+    
+    return map_widget
 
 
 def server(input, output, session):
@@ -703,7 +748,7 @@ def server(input, output, session):
                                             nugget_fraction=float(input.kriging_nugget_fraction()),
                                             grid_size=65,
                                             validation_code="NEWC",)
-        except (KrigingError, ValueError, np.linalg.LinAlgError) as exc:
+        except (ValueError, np.linalg.LinAlgError) as exc:
             return {"analysis": None, "error": str(exc)}
 
         return {"analysis": analysis, "error": None} 
@@ -1180,37 +1225,32 @@ def server(input, output, session):
         return fig
 
     # Estimated regional background
-    @render.plot
+    @render_widget
     def kriging_surface():
         kriging_results = kriging_result()
         analysis = kriging_results["analysis"]
         if analysis is None:
-            return empty_static_plot(kriging_results["error"])
-        stations = analysis.stations
-        return static_kriging_map(grid_longitude=analysis.grid_longitude,
+            return empty_plot(kriging_results["error"])
+        return kriging_map(grid_longitude=analysis.grid_longitude,
                                   grid_latitude=analysis.grid_latitude,
                                   values=analysis.prediction,
-                                  stations=stations,
+                                  stations=analysis.stations,
                                   title="Kriging PM2.5 prediction",
-                                  colour_map="viridis",
-                                  colourbar_title="Predicted PM2.5 (µg/m³)",)
+                                  colour_map="viridis",)
 
     # Kriging standard deviation
-    @render.plot
+    @render_widget
     def kriging_uncertainty():
         kriging_results = kriging_result()
         analysis = kriging_results["analysis"]
         if analysis is None:
-            return empty_static_plot(kriging_results["error"])
-        prediction_sd = np.sqrt(analysis.prediction_variance)
-        stations = analysis.stations
-        return static_kriging_map(grid_longitude=analysis.grid_longitude,
+            return empty_plot(kriging_results["error"])
+        return kriging_map(grid_longitude=analysis.grid_longitude,
                                   grid_latitude=analysis.grid_latitude,
-                                  values=prediction_sd,
-                                  stations=stations,
+                                  values=np.sqrt(analysis.prediction_variance),
+                                  stations=analysis.stations,
                                   title="Kriging prediction uncertainty",
-                                  colour_map="magma",
-                                  colourbar_title="Prediction standard deviation (µg/m³)",)
+                                  colour_map="magma",)
 
     # Distance-versus-dissimilarity diagnostic variogram
     #@render_plotly

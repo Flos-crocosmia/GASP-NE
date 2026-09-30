@@ -13,6 +13,8 @@ import pandas as pd
 
 MINIMUM_SENSOR_COUNT = 4
 SUPPORTED_MODELS = {"exponential", "gaussian", "spherical", "matern"}
+AUTOMATIC_NUGGET_FRACTIONS = np.array([0.00, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.60])
+AUTOMATIC_RANGE_CANDIDATE_COUNT = 18
 
 # Just to avoid a dictionary ouput
 @dataclass
@@ -79,7 +81,7 @@ def covariance(distance, model, range_km, sill, nugget_fraction, diagonal=False)
     nugget = sill * nugget_fraction
     spatial_variance = sill - nugget
     result = spatial_variance * spatial_correlation(distance, model, range_km,)
-    if diagonal:
+    if diagonal: 
         result = result + nugget * np.eye(result.shape[0])
     return result
 
@@ -150,6 +152,63 @@ def leave_one_out(stations, xy, values, model, range_km, sill, nugget_fraction):
     return result
 
 
+def validation_errors(local_contributions):
+    # Summarise leave-one-out residuals. The local contribution is exactly
+    # observed minus leave-one-out background prediction.
+    errors = local_contributions["local_contribution"].to_numpy(float)
+    rmse = float(np.sqrt(np.mean(errors**2)))
+    mae = float(np.mean(np.abs(errors)))
+    return rmse, mae
+
+
+def optimise_automatic_parameters(stations, xy, values, model, sill):
+    # Choose range and nugget using leave-one-sensor-out prediction error.
+    # Mean of RMSE and MAE. Both are measured in µg/m³, RMSE gives extra weight to large misses, 
+    # while MAE keeps the optimisation representative of the typical sensor error.
+
+    sensor_distances = pairwise_distance(xy, xy)
+    pair_distances = sensor_distances[np.triu_indices(len(xy), k=1)]
+    pair_distances = pair_distances[pair_distances > 1e-6]
+    if len(pair_distances) == 0:
+        raise ValueError("The sensor locations are not distinct.")
+
+    # Search from half a typical short separation to twice the network width.
+    # The previous median-distance heuristic is included explicitly, so the
+    # optimised result cannot be worse than that old automatic setting on the
+    # same RMSE/MAE objective.
+    lower_range = max(0.25, 0.5 * float(np.percentile(pair_distances, 10)))
+    upper_range = max(2.0 * float(np.max(pair_distances)), 2.0 * lower_range)
+    range_candidates = np.geomspace(
+        lower_range,
+        upper_range,
+        AUTOMATIC_RANGE_CANDIDATE_COUNT,
+    )
+    range_candidates = np.unique(np.append(range_candidates, float(np.median(pair_distances))))
+    best_result = None
+    for candidate_range in range_candidates:
+        for candidate_nugget in AUTOMATIC_NUGGET_FRACTIONS:
+            contributions = leave_one_out(stations, xy, values, model, float(candidate_range), sill, float(candidate_nugget),)
+            rmse, mae = validation_errors(contributions)
+            if not np.isfinite(rmse) or not np.isfinite(mae):
+                continue
+
+            score = (rmse + mae)/2
+            # The remaining values provide deterministic tie-breaks. If two
+            # settings predict equally well, prefer the lower RMSE and then
+            # the simpler, smaller nugget.
+            comparison_key = (score, rmse, mae, float(candidate_nugget), float(candidate_range),)
+
+            if best_result is None or comparison_key < best_result["key"]:
+                best_result = {"key": comparison_key,
+                               "range_km": float(candidate_range),
+                               "nugget_fraction": float(candidate_nugget),
+                               "local_contributions": contributions,
+                               "rmse": rmse,
+                               "mae": mae,}
+    if best_result is None:
+        raise ValueError("Automatic variogram optimisation did not produce a valid result.")
+
+    return best_result
 
 
 def empirical_variogram(xy, values):
@@ -199,15 +258,11 @@ def run_kriging_analysis(sensor_values, *, model="exponential", parameter_mode="
 
     sill = max(float(np.var(values, ddof=1)), 1e-6)
 
+    automatic_result = None
     if parameter_mode == "auto":
-        sensor_distances = pairwise_distance(xy, xy)
-        pair_distances = sensor_distances[np.triu_indices(len(xy), k=1)]
-        pair_distances = pair_distances[pair_distances > 1e-6]
-        if len(pair_distances) == 0:
-            raise ValueError("The sensor locations are not distinct.")
-
-        range_km = float(np.median(pair_distances))
-        nugget_fraction = 0.10
+        automatic_result = optimise_automatic_parameters(stations, xy, values, model, sill,)
+        range_km = automatic_result["range_km"]
+        nugget_fraction = automatic_result["nugget_fraction"]
 
     range_km = float(range_km)
     nugget_fraction = float(nugget_fraction)
@@ -218,10 +273,14 @@ def run_kriging_analysis(sensor_values, *, model="exponential", parameter_mode="
         raise ValueError("The nugget fraction must be between 0 and 1.")
 
     # Leave-one-out results define the local contribution at every sensor.
-    local_contributions = leave_one_out(stations, xy, values, model, range_km, sill, nugget_fraction,)
-    errors = local_contributions["local_contribution"].to_numpy(float)
-    loo_rmse = float(np.sqrt(np.mean(errors**2)))
-    loo_mae = float(np.mean(np.abs(errors)))
+    # Don't need to calculate a second time if auto mode.
+    if automatic_result is not None:
+        local_contributions = automatic_result["local_contributions"]
+        loo_rmse = automatic_result["rmse"]
+        loo_mae = automatic_result["mae"]
+    else:
+        local_contributions = leave_one_out(stations, xy, values, model, range_km, sill, nugget_fraction,)
+        loo_rmse, loo_mae = validation_errors(local_contributions)
 
     # Rectangular grid covering the sensor network.
     padding = max(0.75, 0.08 * max(float(np.ptp(xy[:, 0])), float(np.ptp(xy[:, 1]))))

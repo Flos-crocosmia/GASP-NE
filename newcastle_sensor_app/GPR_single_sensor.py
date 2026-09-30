@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 import gpflow
+import tensorflow as tf
+import tensorflow_probability as tfp
 
+tfd = tfp.distributions
 
 # SINGLE-SENSOR GP
 #
@@ -26,6 +29,10 @@ def sampling_interval(timestamps):
     if median_interval <= pd.Timedelta(minutes=20):
         return pd.Timedelta(minutes=15), "15min"
     return pd.Timedelta(hours=1), "1h"
+
+def lognormal_prior(median, spread=0.5):
+    return tfd.LogNormal(loc=tf.math.log(tf.constant(median, dtype=tf.float64)),
+                        scale=tf.constant(spread, dtype=tf.float64,),)
 
 
 def forecast_single_sensor_gp(readings, *, forecast_hours=24, training_hours=168, max_training_points=700, optimiser_iterations=200,):
@@ -63,7 +70,7 @@ def forecast_single_sensor_gp(readings, *, forecast_hours=24, training_hours=168
     if len(training) < 12:
         raise RuntimeError("Too few regular observations remain after preparing the GP data.")
 
-    # GP inputs use hours since the start of the fitted window.  PM2.5 is
+    # GP inputs use hours since the start of the fitted window. PM2.5 is
     # log-transformed and standardised to improve numerical stability.
     origin = training.index[0]
     x_train = ((training.index - origin) / pd.Timedelta(hours=1)).to_numpy(dtype=np.float64).reshape(-1, 1)
@@ -79,15 +86,22 @@ def forecast_single_sensor_gp(readings, *, forecast_hours=24, training_hours=168
 
     # Adapted directly from the original kernel components:
     # a smooth Matern trend plus a physically interpretable 24-hour cycle.
-    trend_kernel = gpflow.kernels.Matern32(variance=0.7, lengthscales=24.0,)
+
+    trend_kernel = gpflow.kernels.Matern32(variance=0.7,lengthscales=24.0,)
     daily_base = gpflow.kernels.SquaredExponential(variance=0.3, lengthscales=3.0,)
     daily_kernel = gpflow.kernels.Periodic(base_kernel=daily_base, period=24.0,)
-    gpflow.utilities.set_trainable(daily_kernel.period, False)
+    gpflow.utilities.set_trainable(daily_kernel.period, False,)
+    # Prior settings
+    trend_kernel.variance.prior = lognormal_prior(median=0.7, spread=0.5,)
+    trend_kernel.lengthscales.prior = lognormal_prior(median=24.0, spread=0.5,)
+    daily_base.variance.prior = lognormal_prior(median=0.3, spread=0.5,)
+    daily_base.lengthscales.prior = lognormal_prior(median=3.0, spread=0.5,)
 
     model = gpflow.models.GPR(data=(x_train, y_train),
                               kernel=trend_kernel + daily_kernel,
                               mean_function=gpflow.mean_functions.Zero(),)
     model.likelihood.variance.assign(0.05)
+    model.likelihood.variance.prior = lognormal_prior(median=0.05, spread=0.5,)
 
     try:
         gpflow.optimizers.Scipy().minimize(model.training_loss,
